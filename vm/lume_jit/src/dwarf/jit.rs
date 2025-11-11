@@ -77,3 +77,7 @@ pub(crate) fn register_jit_code(symfile_data: &[u8]) {
         __jit_debug_descriptor.action_flag = 0;
     }
 }
+
+unsafe extern "C" {
+    pub fn __register_frame(fde: *const u8);
+}

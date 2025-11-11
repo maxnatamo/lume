@@ -1,20 +1,18 @@
 use std::collections::HashMap;
 
-use cranelift::codegen::ir::Endianness;
-use cranelift::prelude::isa::TargetIsa;
-use cranelift_codegen::{Final, MachSrcLoc};
+use cranelift_codegen::MachSrcLoc;
+use cranelift_codegen::ir::Endianness;
 use cranelift_jit::JITModule;
 use gimli::write::*;
-use gimli::{DwLang, Encoding, LineEncoding, Register, RunTimeEndian};
-use indexmap::IndexMap;
+use gimli::{DwLang, LineEncoding, Register, RunTimeEndian};
 use lume_errors::{MapDiagnostic, Result};
-use lume_mir::{Function, ModuleMap};
+use lume_mir::Function;
+use lume_span::NodeId;
 use lume_span::source::Location;
-use lume_span::{NodeId, SourceFileId};
 use object::write::{Object, StandardSection, StandardSegment, Symbol, SymbolSection};
 use object::{BinaryFormat, NativeEndian, SectionKind, SymbolKind, SymbolScope};
 
-use crate::dwarf::jit;
+use crate::dwarf::{RootDebugContext, jit};
 use crate::{CraneliftBackend, FunctionMetadata};
 
 /// DWARF identifier for the Lume language
@@ -30,63 +28,25 @@ pub(crate) fn producer() -> String {
     )
 }
 
-/// Context for creating DWARF debug info, which is defined
-/// on the compilation unit itself, i.e. related to the package as
-/// a whole.
-pub(crate) struct RootDebugContext<'ctx> {
-    ctx: &'ctx ModuleMap,
-    dwarf: Dwarf,
-    encoding: Encoding,
-    endianess: RunTimeEndian,
-    stack_register: Register,
-
-    file_units: IndexMap<SourceFileId, UnitId>,
-    func_entries: IndexMap<NodeId, UnitEntryId>,
-    func_mach_src: IndexMap<NodeId, Vec<MachSrcLoc<Final>>>,
-    source_locations: IndexMap<SourceFileId, FileId>,
-}
-
 impl<'ctx> RootDebugContext<'ctx> {
-    pub(crate) fn new(ctx: &'ctx ModuleMap, isa: &dyn TargetIsa) -> Self {
-        let encoding = Encoding {
-            format: gimli::Format::Dwarf32,
-            version: 5,
-            address_size: isa.frontend_config().pointer_bytes(),
-        };
-
-        let dwarf = Dwarf::new();
-
-        let endianess = match isa.endianness() {
+    pub(crate) fn endianess(&self) -> RunTimeEndian {
+        match self.isa.endianness() {
             Endianness::Big => RunTimeEndian::Big,
             Endianness::Little => RunTimeEndian::Little,
-        };
+        }
+    }
 
-        let stack_register = match isa.triple().architecture {
+    pub(crate) fn stack_register(&self) -> Register {
+        match self.isa.triple().architecture {
             target_lexicon::Architecture::Aarch64(_) => gimli::AArch64::SP,
             target_lexicon::Architecture::Riscv64(_) => gimli::RiscV::SP,
             target_lexicon::Architecture::X86_64 | target_lexicon::Architecture::X86_64h => gimli::X86_64::RSP,
             arch => panic!("unsupported ISA archicture: {arch}"),
-        };
-
-        let mut debug_ctx = Self {
-            ctx,
-            dwarf,
-            encoding,
-            endianess,
-            stack_register,
-            file_units: IndexMap::new(),
-            func_entries: IndexMap::new(),
-            func_mach_src: IndexMap::new(),
-            source_locations: IndexMap::new(),
-        };
-
-        debug_ctx.create_compile_units();
-
-        debug_ctx
+        }
     }
 
     /// Creates compile units for all files within the compilation context.
-    fn create_compile_units(&mut self) {
+    pub(super) fn create_compile_units(&mut self) {
         for (file, _) in self.ctx.group_by_file() {
             // Define line program
             let line_strings = &mut self.dwarf.line_strings;
@@ -135,6 +95,8 @@ impl<'ctx> RootDebugContext<'ctx> {
     /// Declares the initial debug information for the given function, so the
     /// layout of the DWARF tag is laid out. Some fields may be unset.
     pub(crate) fn declare_function(&mut self, func: &Function) {
+        let stack_register = self.stack_register();
+
         let compile_unit_id = *self.file_units.get(&func.location.file.id).unwrap();
         let compile_unit = self.dwarf.units.get_mut(compile_unit_id);
 
@@ -156,7 +118,7 @@ impl<'ctx> RootDebugContext<'ctx> {
 
         // DW_AT_frame_base
         let mut frame_base_expr = Expression::new();
-        frame_base_expr.op_reg(self.stack_register);
+        frame_base_expr.op_reg(stack_register);
         entry.set(gimli::DW_AT_frame_base, AttributeValue::Exprloc(frame_base_expr));
 
         // Will be replaced after the function has been defined.
@@ -164,15 +126,6 @@ impl<'ctx> RootDebugContext<'ctx> {
         entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(0));
 
         self.func_entries.insert(func.id, entry_id);
-    }
-
-    /// Retrieves the source locations from the given function and places them
-    /// into the DWARF unit.
-    pub(crate) fn define_function(&mut self, func_id: NodeId, ctx: &cranelift::codegen::Context) {
-        let mcr = ctx.compiled_code().unwrap();
-        let mach_loc = mcr.buffer.get_srclocs_sorted().to_vec();
-
-        self.func_mach_src.insert(func_id, mach_loc);
     }
 
     /// Populates all the function units in the DWARF unit with correct function
@@ -266,6 +219,7 @@ impl<'ctx> RootDebugContext<'ctx> {
         function_metadata: &HashMap<NodeId, FunctionMetadata>,
     ) -> Result<()> {
         self.populate_function_units(backend, module, function_metadata)?;
+        self.populate_frame_table(backend, module)?;
 
         let arch = match backend.isa.triple().architecture {
             target_lexicon::Architecture::Aarch64(_) => object::Architecture::Aarch64,
@@ -276,7 +230,7 @@ impl<'ctx> RootDebugContext<'ctx> {
             arch => panic!("unsupported ISA archicture: {arch}"),
         };
 
-        let endian = match self.endianess {
+        let endian = match self.endianess() {
             RunTimeEndian::Big => object::Endianness::Big,
             RunTimeEndian::Little => object::Endianness::Little,
         };
@@ -305,7 +259,7 @@ impl<'ctx> RootDebugContext<'ctx> {
             });
         }
 
-        let mut sections = Sections::new(EndianVec::<RunTimeEndian>::new(self.endianess));
+        let mut sections = Sections::new(EndianVec::<RunTimeEndian>::new(self.endianess()));
         self.dwarf.write(&mut sections).unwrap();
 
         sections
@@ -325,14 +279,12 @@ impl<'ctx> RootDebugContext<'ctx> {
             .map_diagnostic()?;
 
         let bytes = object.write().unwrap();
-<<<<<<< HEAD:vm/lume_jit/src/dwarf.rs
         let symfile_addr = Box::leak(bytes.into_boxed_slice());
 
         patch_binary_file(symfile_addr, bytes_ptr, bytes_len)?;
-        register_jit_code(symfile_addr);
-=======
-        jit::register_jit_code(&bytes);
->>>>>>> 43c805b9 (chore(jit): split debug module into separate files):vm/lume_jit/src/dwarf/debug_ctx.rs
+        jit::register_jit_code(symfile_addr);
+
+        self.register_frames()?;
 
         Ok(())
     }

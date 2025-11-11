@@ -144,11 +144,11 @@ impl CraneliftBackend {
 
         Ok(Self {
             context,
+            isa,
             module: Some(Rc::new(RwLock::new(module))),
             declared_funcs: IndexMap::new(),
             intrinsics,
             flags,
-            isa,
             static_data: RwLock::new(HashMap::new()),
             location_indices: RwLock::new(IndexSet::new()),
         })
@@ -176,7 +176,7 @@ impl CraneliftBackend {
         let mut function_metadata = HashMap::new();
 
         let mut debug_ctx = if self.context.options.debug_info > DebugInfo::None {
-            Some(RootDebugContext::new(&self.context, self.module().isa()))
+            Some(RootDebugContext::new(&self.context, self.isa.clone()))
         } else {
             None
         };
