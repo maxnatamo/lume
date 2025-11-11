@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::Mutex;
 
 use cranelift::codegen::ir::Endianness;
 use cranelift::prelude::isa::TargetIsa;
@@ -16,6 +14,7 @@ use lume_span::{NodeId, SourceFileId};
 use object::write::{Object, StandardSection, StandardSegment, Symbol, SymbolSection};
 use object::{BinaryFormat, NativeEndian, SectionKind, SymbolKind, SymbolScope};
 
+use crate::dwarf::jit;
 use crate::{CraneliftBackend, FunctionMetadata};
 
 /// DWARF identifier for the Lume language
@@ -326,10 +325,14 @@ impl<'ctx> RootDebugContext<'ctx> {
             .map_diagnostic()?;
 
         let bytes = object.write().unwrap();
+<<<<<<< HEAD:vm/lume_jit/src/dwarf.rs
         let symfile_addr = Box::leak(bytes.into_boxed_slice());
 
         patch_binary_file(symfile_addr, bytes_ptr, bytes_len)?;
         register_jit_code(symfile_addr);
+=======
+        jit::register_jit_code(&bytes);
+>>>>>>> 43c805b9 (chore(jit): split debug module into separate files):vm/lume_jit/src/dwarf/debug_ctx.rs
 
         Ok(())
     }
@@ -510,79 +513,4 @@ fn patch_binary_file(bytes: &mut [u8], code_start: *const u8, code_size: usize) 
     }
 
     Ok(())
-}
-
-#[repr(C)]
-pub struct JITCodeEntry {
-    pub next_entry: *mut JITCodeEntry,
-    pub prev_entry: *mut JITCodeEntry,
-    pub symfile_addr: *const u8,
-    pub symfile_size: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct GlobalPointer<T>(*mut T);
-
-impl<T> Deref for GlobalPointer<T> {
-    type Target = *mut T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-unsafe impl<T> Send for GlobalPointer<T> {}
-unsafe impl<T> Sync for GlobalPointer<T> {}
-
-#[repr(C)]
-pub struct JITDescriptor {
-    pub version: u32,
-    pub action_flag: i32,
-    pub relevant_entry: *mut JITCodeEntry,
-    pub first_entry: *mut JITCodeEntry,
-}
-
-#[unsafe(no_mangle)]
-#[allow(non_upper_case_globals, reason = "external object reference")]
-pub static mut __jit_debug_descriptor: JITDescriptor = JITDescriptor {
-    version: 1,
-    action_flag: 0,
-    relevant_entry: std::ptr::null_mut(),
-    first_entry: std::ptr::null_mut(),
-};
-
-#[unsafe(no_mangle)]
-pub extern "C" fn __jit_debug_register_code() {
-    // Empty function — the debugger sets a breakpoint here.
-}
-
-static LIST: Mutex<Vec<GlobalPointer<JITCodeEntry>>> = Mutex::new(Vec::new());
-
-fn register_jit_code(symfile_addr: &[u8]) {
-    unsafe {
-        let entry = Box::into_raw(Box::new(JITCodeEntry {
-            next_entry: std::ptr::null_mut(),
-            prev_entry: std::ptr::null_mut(),
-            symfile_addr: symfile_addr.as_ptr(),
-            symfile_size: symfile_addr.len() as u64,
-        }));
-
-        {
-            let mut list = LIST.lock().unwrap();
-
-            if let Some(head) = list.last() {
-                (*head.0).next_entry = entry;
-                (*entry).prev_entry = head.0;
-            } else {
-                __jit_debug_descriptor.first_entry = entry;
-            }
-
-            list.push(GlobalPointer(entry));
-        }
-
-        __jit_debug_descriptor.relevant_entry = entry;
-        __jit_debug_descriptor.action_flag = 1; // JIT_REGISTER
-        __jit_debug_register_code();
-        __jit_debug_descriptor.action_flag = 0;
-    }
 }
