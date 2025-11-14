@@ -1,4 +1,3 @@
-use cranelift::prelude::*;
 use cranelift_codegen::isa::unwind::UnwindInfo;
 use cranelift_jit::JITModule;
 use gimli::write::{Address, EhFrame, Sections, Writer};

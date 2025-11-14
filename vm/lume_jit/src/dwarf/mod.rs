@@ -11,6 +11,7 @@ use lume_span::{NodeId, SourceFileId};
 
 pub mod debug_ctx;
 pub mod jit;
+pub mod patch;
 pub mod unwind;
 pub mod writer;
 
