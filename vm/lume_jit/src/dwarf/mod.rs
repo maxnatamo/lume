@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use cranelift_codegen::isa::TargetIsa;
@@ -13,6 +12,7 @@ use lume_span::{NodeId, SourceFileId};
 pub mod debug_ctx;
 pub mod jit;
 pub mod unwind;
+pub mod writer;
 
 /// Context for creating DWARF debug info, which is defined
 /// on the compilation unit itself, i.e. related to the package as
@@ -29,13 +29,17 @@ pub(crate) struct RootDebugContext<'ctx> {
     source_locations: IndexMap<SourceFileId, FileId>,
 
     frame_table: FrameTable,
-    unwind_info: HashMap<NodeId, UnwindInfo>,
+    unwind_info: IndexMap<NodeId, UnwindInfo>,
 }
 
 impl<'ctx> RootDebugContext<'ctx> {
     pub(crate) fn new(ctx: &'ctx ModuleMap, isa: Arc<dyn TargetIsa>) -> Self {
         let encoding = Encoding {
-            format: gimli::Format::Dwarf32,
+            format: if isa.pointer_bits() == 32 {
+                gimli::Format::Dwarf64
+            } else {
+                gimli::Format::Dwarf32
+            },
             version: 5,
             address_size: isa.frontend_config().pointer_bytes(),
         };
@@ -52,7 +56,7 @@ impl<'ctx> RootDebugContext<'ctx> {
             func_mach_src: IndexMap::new(),
             source_locations: IndexMap::new(),
             frame_table: FrameTable::default(),
-            unwind_info: HashMap::new(),
+            unwind_info: IndexMap::new(),
         };
 
         debug_ctx.create_compile_units();

@@ -215,7 +215,7 @@ impl<'ctx> RootDebugContext<'ctx> {
     pub fn finish(
         mut self,
         backend: &CraneliftBackend,
-        module: &JITModule,
+        module: &mut JITModule,
         function_metadata: &HashMap<NodeId, FunctionMetadata>,
     ) -> Result<()> {
         self.populate_function_units(backend, module, function_metadata)?;
@@ -261,6 +261,7 @@ impl<'ctx> RootDebugContext<'ctx> {
 
         let mut sections = Sections::new(EndianVec::<RunTimeEndian>::new(self.endianess()));
         self.dwarf.write(&mut sections).unwrap();
+        self.register_frames(module, &mut sections)?;
 
         sections
             .for_each_mut(|id, section| {
@@ -284,7 +285,6 @@ impl<'ctx> RootDebugContext<'ctx> {
         patch_binary_file(symfile_addr, bytes_ptr, bytes_len)?;
         jit::register_jit_code(symfile_addr);
 
-        self.register_frames()?;
 
         Ok(())
     }
