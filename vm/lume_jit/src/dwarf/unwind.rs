@@ -18,6 +18,8 @@ impl<'ctx> RootDebugContext<'ctx> {
             let func_decl = backend.declared_funcs.get(&node_id).unwrap();
             let func_addr = module.get_finalized_function(func_decl.id).cast_mut();
 
+            // println!("[{func_addr:p}] {}", func_decl.name);
+
             match unwind_info {
                 UnwindInfo::SystemV(unwind_info) => {
                     let fde = unwind_info.to_fde(Address::Constant(func_addr.addr() as u64));

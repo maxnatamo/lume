@@ -1,13 +1,11 @@
 [package]
-name = "lume_runtime"
+name = "lume_unwind"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-lume_rt_metadata = { path = "../lume_rt_metadata" }
-lume_unwind = { path = "../lume_unwind" }
-
+libc = "*"
 backtrace = { version = "=0.3.76" }
 
 [lints]

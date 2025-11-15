@@ -10,3 +10,25 @@ pub mod string;
 pub extern "C" fn type_of(metadata: *const ()) -> *const () {
     metadata
 }
+
+pub extern "C" fn backtrace() {
+    println!("Stack trace:");
+
+    backtrace::trace(|frame| {
+        let mut name = None;
+        let mut addr = None;
+
+        backtrace::resolve(frame.ip(), |symbol| {
+            name = symbol.name().map(|n| n.to_string());
+            addr = symbol.addr();
+        });
+
+        println!(
+            "  {} in {}",
+            addr.map_or_else(|| format!("{:p}", frame.ip()), |addr| format!("{addr:p}")),
+            name.unwrap_or_else(|| String::from("??")),
+        );
+
+        true
+    });
+}

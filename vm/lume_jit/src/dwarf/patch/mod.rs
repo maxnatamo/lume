@@ -6,6 +6,7 @@ struct Patch<'data> {
     offset: usize,
 }
 
+#[allow(dead_code)]
 impl<'data> Patch<'data> {
     pub fn new(bytes: &'data mut [u8]) -> Self {
         Self { bytes, offset: 0 }

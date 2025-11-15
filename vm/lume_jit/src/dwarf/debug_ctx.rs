@@ -296,6 +296,7 @@ impl<'ctx> RootDebugContext<'ctx> {
 
         jit::register_jit_code(symfile_addr);
 
+        std::fs::write("./jit_module.elf", symfile_addr).unwrap();
 
         Ok(())
     }

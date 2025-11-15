@@ -26,6 +26,7 @@ use lume_span::source::Location;
 use crate::dwarf::RootDebugContext;
 
 pub const INTRINSIC_FUNCTIONS: &[(&str, *const u8)] = &[
+    ("backtrace", lume_runtime::backtrace as *const u8),
     ("std::type_of", lume_runtime::type_of as *const u8),
     ("std::mem::alloc", lume_runtime::mem::lumert_alloc as *const u8),
     ("std::mem::realloc", lume_runtime::mem::lumert_realloc as *const u8),
@@ -231,6 +232,8 @@ impl CraneliftBackend {
 
             let start = module.get_finalized_function(func.id);
             let end = unsafe { start.byte_add(metadata.total_size) };
+
+            println!("{} => {start:p}", func.name);
 
             func_stack_maps.push(CompiledFunctionMetadata {
                 start,
