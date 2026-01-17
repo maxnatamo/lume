@@ -1,0 +1,27 @@
+[package]
+name = "linker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+lume_errors = { path = "../../crates/lume_errors" }
+lume_span = { path = "../../crates/lume_span" }
+
+ar = { version = "0.9.0" }
+cfg-if = { version = "1.0.4" }
+clap = { workspace = true }
+error_snippet = { workspace = true }
+indexmap = { workspace = true }
+object = { version = "0.37", features = ["read"] }
+
+# Used for parsing macOS .tbd files
+[target.'cfg(target_os = "macos")'.dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde-saphyr = { version = "0.0.14" }
+
+[lints]
+workspace = true
