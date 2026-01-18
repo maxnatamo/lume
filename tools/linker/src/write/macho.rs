@@ -1,155 +1,163 @@
 use lume_errors::Result;
 use object::{NativeEndian as NE, macho};
 
-use crate::layout::Layout;
+use crate::layout::{Layout, LayoutBuilder};
 use crate::write::Writer;
-use crate::{AdditionalData, AdditionalHeader, Architecture, SectionId, Target, align_to};
+use crate::*;
 
-pub(crate) struct FileFormat;
+#[derive(Hash, Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MachoEntry {
+    /// Load dynamic library of the given ID
+    DylibHeader(LibraryId),
 
-macro_rules! expect_len {
-    ($writer:expr,$expected:expr,$fmt:expr) => {
-        debug_assert_eq!($writer.len(), $expected, $fmt, $expected, $writer.len());
-    };
+    /// Load command for the symbol header
+    SymbolTableHeader,
 }
 
-impl crate::layout::FileFormat for FileFormat {
-    fn file_header_size(target: Target) -> usize {
-        if target.is_64bit() {
-            size_of::<macho::MachHeader64<NE>>()
-        } else {
-            size_of::<macho::MachHeader32<NE>>()
+impl CustomEntry for MachoEntry {
+    fn physical_size(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64 {
+        match entry {
+            Entry::FileHeader => {
+                if builder.target.is_64bit() {
+                    size_of::<macho::MachHeader64<NE>>() as u64
+                } else {
+                    size_of::<macho::MachHeader32<NE>>() as u64
+                }
+            }
+            Entry::SegmentHeader(_) => {
+                if builder.target.is_64bit() {
+                    size_of::<macho::SegmentCommand64<NE>>() as u64
+                } else {
+                    size_of::<macho::SegmentCommand32<NE>>() as u64
+                }
+            }
+            Entry::SectionHeader(_) => {
+                if builder.target.is_64bit() {
+                    size_of::<macho::Section64<NE>>() as u64
+                } else {
+                    size_of::<macho::Section32<NE>>() as u64
+                }
+            }
+            Entry::SectionData(section_id) => builder.size_of_section(*section_id),
+            Entry::Relocations(_) => 0,
+            Entry::SymbolTable => {
+                let nsyms = builder.index.symbols.len() as u64;
+                nsyms * size_of::<macho::Nlist64<NE>>() as u64
+            }
+            Entry::StringTable => {
+                // First entry is a single space, used as a null string
+                let mut strsize = 2_u64;
+
+                for symbol_name in builder.index.symbols.keys() {
+                    strsize += symbol_name.len() as u64 + 1;
+                }
+
+                for symbol_name in builder.index.dynamic_symbols.keys() {
+                    strsize += symbol_name.len() as u64 + 1;
+                }
+
+                strsize
+            }
+            Entry::Custom(MachoEntry::DylibHeader(lib_id)) => {
+                let library = builder.db.library(*lib_id);
+
+                let mut dylib_size = 0;
+                dylib_size += size_of::<macho::DylibCommand<NE>>() as u64;
+                dylib_size += library.name.len() as u64 + 1;
+                dylib_size = align_to(dylib_size, align_of::<i32>() as u64);
+
+                dylib_size
+            }
+            Entry::Custom(MachoEntry::SymbolTableHeader) => size_of::<macho::SymtabCommand<NE>>() as u64,
         }
     }
 
-    fn segment_header_size(target: Target) -> usize {
-        if target.is_64bit() {
-            size_of::<macho::SegmentCommand64<NE>>()
-        } else {
-            size_of::<macho::SegmentCommand32<NE>>()
-        }
-    }
-
-    fn section_header_size(target: Target) -> usize {
-        if target.is_64bit() {
-            size_of::<macho::Section64<NE>>()
-        } else {
-            size_of::<macho::Section32<NE>>()
-        }
-    }
-
-    fn string_table(layout: &mut Layout<Self>)
-    where
-        Self: Sized,
-    {
-        // First entry is a single space, used as a null string
-        layout.string_table.insert(String::from(" "));
-
-        for symbol_name in layout.index.symbols.keys() {
-            layout.string_table.insert(symbol_name.to_owned());
+    fn virtual_size(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64 {
+        if let Entry::SegmentHeader(segment_name) = entry {
+            return builder.vmsize_of_segment(segment_name);
         }
 
-        for symbol_name in layout.index.dynamic_symbols.keys() {
-            layout.string_table.insert(symbol_name.to_owned());
-        }
-    }
-
-    fn additional_headers(layout: &Layout<Self>) -> Option<Vec<AdditionalHeader>>
-    where
-        Self: Sized,
-    {
-        let mut dylib_size = 0;
-        for required_lib in layout.required_libraries() {
-            dylib_size += size_of::<macho::DylibCommand<NE>>() as u64;
-            dylib_size += required_lib.name.len() as u64 + 1;
-            dylib_size = align_to(dylib_size, align_of::<i32>() as u64);
-        }
-
-        Some(vec![
-            AdditionalHeader {
-                name: "symtab",
-                size: size_of::<macho::SymtabCommand<NE>>() as u64,
-            },
-            AdditionalHeader {
-                name: "dylib",
-                size: dylib_size,
-            },
-        ])
-    }
-
-    fn additional_data(layout: &Layout<Self>) -> Option<Vec<AdditionalData>>
-    where
-        Self: Sized,
-    {
-        let mut strsize = 0_u64;
-        for symbol_name in &layout.string_table {
-            strsize += symbol_name.len() as u64 + 1;
-        }
-
-        let nsyms = layout.index.symbols.len() as u64;
-
-        Some(vec![
-            AdditionalData {
-                name: "strtab",
-                size: strsize,
-            },
-            AdditionalData {
-                name: "symtab",
-                size: nsyms * size_of::<macho::Nlist64<NE>>() as u64,
-            },
-        ])
+        Self::physical_size(entry, builder)
     }
 }
 
-pub(super) fn emit_to<W: Writer, F: crate::layout::FileFormat>(writer: &mut W, layout: Layout<F>) -> Result<()> {
+pub(super) fn declare_layout(builder: &mut LayoutBuilder<MachoEntry>) {
+    builder.declare_entry(Entry::FileHeader);
+
+    let segments: Vec<_> = builder.segments().map(ToOwned::to_owned).collect();
+    for segment in segments {
+        builder.declare_entry(Entry::SegmentHeader(segment.clone()));
+
+        let sections: Vec<_> = builder.db.sections_in_segment(&segment).collect();
+        for section in sections {
+            builder.declare_entry(Entry::SectionHeader(section));
+        }
+    }
+
+    builder.declare_entry(Entry::Custom(MachoEntry::SymbolTableHeader));
+
+    for library_id in builder.required_library_ids() {
+        builder.declare_entry(Entry::Custom(MachoEntry::DylibHeader(library_id)));
+    }
+
+    let section_ids: Vec<_> = builder.db.merged_sections().map(|sec| sec.id).collect();
+
+    for section_id in section_ids.iter().copied() {
+        builder.declare_entry(Entry::SectionData(section_id));
+    }
+
+    builder.declare_entry(Entry::StringTable);
+    builder.declare_entry(Entry::SymbolTable);
+}
+
+pub(super) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<MachoEntry>) -> Result<()> {
     let mut builder = Builder::new(layout);
 
-    builder.layout.apply_relocations();
+    for (entry, metadata) in builder.layout.clone_entries() {
+        let alignment = builder.layout.alignment_of_entry(&entry);
+        writer.align_to(usize::try_from(alignment).unwrap())?;
 
-    builder.write_header(writer)?;
-    builder.write_segments(writer)?;
+        let current_length = writer.len();
 
-    builder.write_lc_symtab(writer)?;
-    builder.write_lc_dylib(writer)?;
+        let entry_offset = builder.layout.offset_of_entry(&entry);
+        assert_eq!(entry_offset, current_length as u64);
 
-    expect_len!(
-        writer,
-        builder.layout.header_size(),
-        "expected header of {} bytes, but got {}"
-    );
+        match &entry {
+            Entry::FileHeader => builder.write_file_header(writer)?,
+            Entry::SegmentHeader(segment) => builder.write_segment_header(segment, writer)?,
+            Entry::SectionHeader(section_id) => builder.write_section_header(*section_id, writer)?,
+            Entry::Custom(MachoEntry::SymbolTableHeader) => builder.write_symtab_header(writer)?,
+            Entry::Custom(MachoEntry::DylibHeader(lib_id)) => builder.write_dylib_header(*lib_id, writer)?,
+            Entry::SectionData(section_id) => builder.write_section_data(*section_id, writer)?,
+            Entry::Relocations(_section_id) => unreachable!("mach-o should have no relocations"),
+            Entry::StringTable => builder.write_string_table(writer)?,
+            Entry::SymbolTable => builder.write_symbol_table(writer)?,
+        }
 
-    let written = writer.len();
-    builder.write_section_data(writer)?;
-
-    expect_len!(
-        writer,
-        written + usize::try_from(builder.layout.total_segment_size()).unwrap(),
-        "expected body of {} bytes, but got {}"
-    );
-
-    let written = writer.len();
-    builder.write_string_table(writer)?;
-    builder.write_symbol_table(writer)?;
-
-    expect_len!(
-        writer,
-        written + builder.layout.additional_data_total_size(),
-        "expected additional data of {} bytes, but got {}"
-    );
+        let written_bytes = writer.len() - current_length;
+        assert!(
+            metadata.physical_size == written_bytes as u64,
+            "expected entry to be {} bytes, but wrote {} bytes: {entry:?}",
+            metadata.physical_size,
+            written_bytes
+        );
+    }
 
     Ok(())
 }
 
-struct Builder<'db, F: crate::layout::FileFormat> {
+struct Builder<'db> {
     target: Target,
-    layout: Layout<'db, F>,
+    layout: Layout<'db, MachoEntry>,
+    string_table: IndexMap<String, usize>,
 }
 
-impl<'db, F: crate::layout::FileFormat> Builder<'db, F> {
-    pub fn new(layout: Layout<'db, F>) -> Self {
+impl<'db> Builder<'db> {
+    pub fn new(layout: Layout<'db, MachoEntry>) -> Self {
         Builder {
             target: layout.target,
             layout,
+            string_table: IndexMap::new(),
         }
     }
 
@@ -187,7 +195,47 @@ impl<'db, F: crate::layout::FileFormat> Builder<'db, F> {
         }
     }
 
-    pub fn write_header<W: Writer>(&self, writer: &mut W) -> Result<()> {
+    /// Gets the amount of load commands in the Mach-O file.
+    pub fn load_command_len(&self) -> u32 {
+        fn is_lc_entry(entry: &Entry<MachoEntry>) -> bool {
+            matches!(
+                entry,
+                Entry::SegmentHeader(_) | Entry::Custom(MachoEntry::SymbolTableHeader | MachoEntry::DylibHeader(_))
+            )
+        }
+
+        let count = self
+            .layout
+            .entries()
+            .filter_map(|(entry, _meta)| is_lc_entry(entry).then_some(entry))
+            .count();
+
+        u32::try_from(count).unwrap()
+    }
+
+    /// Gets the size of load commands in the Mach-O file, in bytes.
+    pub fn load_command_size(&self) -> u32 {
+        /// Note: should also include the size of child headers as well, such as
+        /// section headers which are children of segment headers.
+        fn is_lc_entry(entry: &Entry<MachoEntry>) -> bool {
+            matches!(
+                entry,
+                Entry::SegmentHeader(_)
+                    | Entry::SectionHeader(_)
+                    | Entry::Custom(MachoEntry::SymbolTableHeader | MachoEntry::DylibHeader(_))
+            )
+        }
+
+        let size = self
+            .layout
+            .entries()
+            .filter_map(|(entry, meta)| is_lc_entry(entry).then_some(meta.physical_size))
+            .sum::<u64>();
+
+        u32::try_from(size).unwrap()
+    }
+
+    pub fn write_file_header<W: Writer>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32(self.magic_number())?;
         writer.write_u32(self.cpu_type())?;
         writer.write_u32(self.cpu_subtype())?;
@@ -207,89 +255,97 @@ impl<'db, F: crate::layout::FileFormat> Builder<'db, F> {
         Ok(())
     }
 
-    pub fn write_segments<W: Writer>(&self, writer: &mut W) -> Result<()> {
-        /*
-        let reloc_base = self.layout.additional_data_offset("relocs");
-        let mut reloc_count = 0_u32;
+    pub fn write_segment_header<W: Writer>(&self, segment_name: &str, writer: &mut W) -> Result<()> {
+        let entry = Entry::SegmentHeader(segment_name.to_owned());
 
-        let reloc_size = u32::try_from(size_of::<macho::Relocation<NE>>()).unwrap();
-         */
+        let segment_size = self.layout.size_of_segment(segment_name);
+        let segment_vmsize = self.layout.vmsize_of_segment(segment_name);
 
-        for segment_name in self.layout.segments() {
-            let sections_in_segment = self.layout.sections_in_segment(segment_name).collect::<Vec<_>>();
-            let section_count = sections_in_segment.len();
+        let sections = self.layout.db.sections_in_segment(segment_name).collect::<Vec<_>>();
+        let mut lc_size = self.layout.size_of_entry(&entry);
 
-            let segment_vmsize = self.layout.vmsize_of_segment(segment_name);
-            let segment_file_size = self.layout.size_of_segment(segment_name);
-
-            let lc_size = F::segment_header_size(self.target) + section_count * F::section_header_size(self.target);
-
-            writer.write_u32(macho::LC_SEGMENT_64)?;
-            writer.write_u32(u32::try_from(lc_size).unwrap())?;
-
-            let mut segment_name_bytes = segment_name.as_bytes().to_vec();
-            segment_name_bytes.resize(16, 0);
-            writer.write(&segment_name_bytes)?;
-
-            writer.write_u64(self.layout.vaddr_of_segment(segment_name))?; // vmaddr
-            writer.write_u64(segment_vmsize)?; // vmsize
-
-            writer.write_u64(self.layout.offset_of_segment(segment_name))?; // fileoff
-            writer.write_u64(segment_file_size)?; // filesize
-
-            writer.write_u32(0x05)?; // maxprot
-            writer.write_u32(0x05)?; // initprot
-
-            writer.write_u32(u32::try_from(section_count).unwrap())?; // nsects
-            writer.write_u32(0x00)?; // flags
-
-            for section_id in sections_in_segment {
-                let section = self.layout.db.merged_section(section_id);
-                let alignment = self.layout.alignment_of_section(section_id);
-
-                let mut section_name_bytes = section.name.section.as_bytes().to_vec();
-                section_name_bytes.resize(16, 0);
-                writer.write(&section_name_bytes)?;
-                writer.write(&segment_name_bytes)?;
-
-                writer.write_u64(self.layout.vaddr_of_section(section_id))?; // addr
-                writer.write_u64(self.layout.size_of_section(section_id))?; // size
-                writer.write_u32(u32::try_from(self.layout.offset_of_section(section_id)).unwrap())?; // offset
-                writer.write_u32(alignment.ilog2())?; // align
-
-                /*
-                let mut nrelocs = 0_u32;
-                for &contained_section_id in &section.merged_from {
-                    let contained_section = self.layout.db.section(contained_section_id);
-                    nrelocs += u32::try_from(contained_section.relocations.len()).unwrap();
-                }
-
-                let reloff = u32::try_from(reloc_base).unwrap() + reloc_count * reloc_size;
-                */
-
-                writer.write_u32(0)?; // reloff
-                writer.write_u32(0)?; // nreloc
-                writer.write_u32(0)?; // flags
-                writer.write_u32(0)?; // reserved1
-                writer.write_u32(0)?; // reserved2
-                writer.write_u32(0)?; // reserved3
-
-                /*
-                reloc_count += nrelocs;
-                */
-            }
+        for &section in &sections {
+            let section_entry = Entry::SectionHeader(section);
+            lc_size += self.layout.size_of_entry(&section_entry);
         }
+
+        writer.write_u32(macho::LC_SEGMENT_64)?;
+        writer.write_u32(u32::try_from(lc_size).unwrap())?;
+
+        let mut segment_name_bytes = segment_name.as_bytes().to_vec();
+        segment_name_bytes.resize(16, 0);
+        writer.write(&segment_name_bytes)?;
+
+        writer.write_u64(self.layout.vaddr_of_entry(&entry))?; // vmaddr
+        writer.write_u64(segment_vmsize)?; // vmsize
+
+        writer.write_u64(self.layout.offset_of_entry(&entry))?; // fileoff
+        writer.write_u64(segment_size)?; // filesize
+
+        let section_prot = match segment_name {
+            macho::SEG_PAGEZERO => 0x0000_0000,
+            macho::SEG_TEXT => macho::VM_PROT_READ | macho::VM_PROT_EXECUTE,
+            macho::SEG_DATA => macho::VM_PROT_READ | macho::VM_PROT_WRITE,
+            _ => macho::VM_PROT_READ,
+        };
+
+        writer.write_u32(section_prot)?; // maxprot
+        writer.write_u32(section_prot)?; // initprot
+
+        writer.write_u32(u32::try_from(sections.len()).unwrap())?; // nsects
+        writer.write_u32(0x00)?; // flags
+
         Ok(())
     }
 
-    pub fn write_lc_symtab<W: Writer>(&self, writer: &mut W) -> Result<()> {
+    pub fn write_section_header<W: Writer>(&self, section_id: MergedSectionId, writer: &mut W) -> Result<()> {
+        let entry = Entry::SectionHeader(section_id);
+
+        let section = self.layout.db.merged_section(section_id);
+        let segment_name = section.name.segment.as_deref().unwrap_or("");
+
+        let mut section_name_bytes = section.name.section.as_bytes().to_vec();
+        section_name_bytes.resize(16, 0);
+        writer.write(&section_name_bytes)?;
+
+        let mut segment_name_bytes = segment_name.as_bytes().to_vec();
+        segment_name_bytes.resize(16, 0);
+        writer.write(&segment_name_bytes)?;
+
+        writer.write_u64(self.layout.vaddr_of_entry(&entry))?; // addr
+        writer.write_u64(self.layout.size_of_entry(&entry))?; // size
+        writer.write_u32(u32::try_from(self.layout.offset_of_entry(&entry)).unwrap())?; // offset
+        writer.write_u32(section.alignment.ilog2())?; // align
+
+        writer.write_u32(0)?; // reloff
+        writer.write_u32(0)?; // nreloc
+
+        let flags = match section.kind {
+            SectionKind::Unknown | SectionKind::Data => macho::S_REGULAR,
+            SectionKind::Text => macho::S_ATTR_SOME_INSTRUCTIONS | macho::S_ATTR_PURE_INSTRUCTIONS,
+            SectionKind::ZeroFilled => macho::S_ZEROFILL,
+            SectionKind::CStrings => macho::S_CSTRING_LITERALS,
+            SectionKind::LumeMetadata => macho::S_ATTR_NO_DEAD_STRIP,
+            SectionKind::LumeAliases => macho::S_LITERAL_POINTERS,
+        };
+
+        writer.write_u32(flags)?;
+
+        writer.write_u32(0)?; // reserved1
+        writer.write_u32(0)?; // reserved2
+        writer.write_u32(0)?; // reserved3
+
+        Ok(())
+    }
+
+    pub fn write_symtab_header<W: Writer>(&self, writer: &mut W) -> Result<()> {
         let lc_size = size_of::<macho::SymtabCommand<NE>>();
 
-        let symoff = self.layout.additional_data_offset("symtab");
+        let symoff = self.layout.offset_of_entry(&Entry::SymbolTable);
         let nsyms = self.layout.index.symbols.len();
 
-        let stroff = self.layout.additional_data_offset("strtab");
-        let strsize = self.layout.additional_data_size("strtab");
+        let stroff = self.layout.offset_of_entry(&Entry::StringTable);
+        let strsize = self.layout.size_of_entry(&Entry::StringTable);
 
         writer.write_u32(macho::LC_SYMTAB)?;
         writer.write_u32(u32::try_from(lc_size).unwrap())?;
@@ -303,43 +359,37 @@ impl<'db, F: crate::layout::FileFormat> Builder<'db, F> {
         Ok(())
     }
 
-    pub fn write_lc_dylib<W: Writer>(&self, writer: &mut W) -> Result<()> {
-        let required_libraries = self.layout.required_library_ids();
+    pub fn write_dylib_header<W: Writer>(&self, library_id: LibraryId, writer: &mut W) -> Result<()> {
+        let library = self.layout.db.library(library_id);
+        let name_size = library.name.len() + 1;
 
-        for library_id in required_libraries {
-            let library = self.layout.db.library(library_id);
-            let name_size = library.name.len() + 1;
+        let lc_size = size_of::<macho::DylibCommand<NE>>() + name_size;
+        let lc_size = align_to(lc_size as u64, align_of::<i32>() as u64);
 
-            let lc_size = size_of::<macho::DylibCommand<NE>>() + name_size;
-            let lc_size = align_to(lc_size as u64, align_of::<i32>() as u64);
+        writer.write_u32(macho::LC_LOAD_DYLIB)?;
+        writer.write_u32(u32::try_from(lc_size).unwrap())?;
 
-            writer.write_u32(macho::LC_LOAD_DYLIB)?;
-            writer.write_u32(u32::try_from(lc_size).unwrap())?;
+        // The library name is placed right after the load command
+        writer.write_u32(u32::try_from(size_of::<macho::DylibCommand<NE>>()).unwrap())?; // name
+        writer.write_u32(0x0000_0000)?; // timestamp
+        writer.write_u32(0x0000_0000)?; // current_version
+        writer.write_u32(0x0000_0000)?; // compatibility_version
 
-            // The library name is placed right after the load command
-            writer.write_u32(u32::try_from(size_of::<macho::DylibCommand<NE>>()).unwrap())?; // name
-            writer.write_u32(0x0000_0000)?; // timestamp
-            writer.write_u32(0x0000_0000)?; // current_version
-            writer.write_u32(0x0000_0000)?; // compatibility_version
+        writer.write(library.name.as_bytes())?;
+        writer.write_u8(0)?;
 
-            writer.write(library.name.as_bytes())?;
-            writer.write_u8(0)?;
-
-            // `otool` claims the `dylib` commands must be padded to a multiple of 4 bytes
-            writer.align_to(align_of::<i32>())?;
-        }
+        // `otool` claims the `dylib` commands must be padded to a multiple of 4 bytes
+        writer.align_to(align_of::<i32>())?;
 
         Ok(())
     }
 
-    pub fn write_section_data<W: Writer>(&self, writer: &mut W) -> Result<()> {
-        for merged_section in self.layout.db.merged_sections() {
-            writer.align_to(merged_section.alignment)?;
+    pub fn write_section_data<W: Writer>(&self, id: MergedSectionId, writer: &mut W) -> Result<()> {
+        let section = self.layout.db.merged_section(id);
 
-            for &contained_section_id in &merged_section.merged_from {
-                let contained_section = self.layout.db.section(contained_section_id);
-                writer.write(&contained_section.data)?;
-            }
+        for &contained_section_id in &section.merged_from {
+            let contained_section = self.layout.db.section(contained_section_id);
+            writer.write(&contained_section.data)?;
         }
 
         Ok(())
@@ -348,13 +398,27 @@ impl<'db, F: crate::layout::FileFormat> Builder<'db, F> {
     pub fn write_string_table<W: Writer>(&mut self, writer: &mut W) -> Result<()> {
         let strtab_base = writer.len();
 
-        for symbol_name in self.layout.string_table.clone() {
+        let string_capacity = 1 + self.layout.index.symbols.len() + self.layout.index.dynamic_symbols.len();
+        let mut strings = IndexSet::with_capacity(string_capacity);
+
+        // First entry is a single space, used as a null string
+        strings.insert(String::from(" "));
+
+        for symbol_name in self.layout.index.symbols.keys() {
+            strings.insert(symbol_name.clone());
+        }
+
+        for symbol_name in self.layout.index.dynamic_symbols.keys() {
+            strings.insert(symbol_name.clone());
+        }
+
+        for symbol_name in strings {
             let offset = writer.len() - strtab_base;
 
             writer.write(symbol_name.as_bytes())?;
             writer.write(&[0])?;
 
-            self.layout.add_string_offset(symbol_name, offset);
+            self.string_table.insert(symbol_name, offset);
         }
 
         Ok(())
@@ -363,7 +427,7 @@ impl<'db, F: crate::layout::FileFormat> Builder<'db, F> {
     pub fn write_symbol_table<W: Writer>(&self, writer: &mut W) -> Result<()> {
         for symbol_id in self.layout.index.symbols.values().copied() {
             let symbol = self.layout.db.symbol(symbol_id).unwrap();
-            let nstrx = *self.layout.string_table_offsets.get(&symbol.name).unwrap();
+            let nstrx = *self.string_table.get(&symbol.name).unwrap();
 
             let n_type = match symbol.linkage {
                 crate::Linkage::External => macho::N_UNDF | macho::N_EXT,
@@ -385,18 +449,6 @@ impl<'db, F: crate::layout::FileFormat> Builder<'db, F> {
         }
 
         Ok(())
-    }
-
-    pub fn load_command_len(&self) -> u32 {
-        let lc_segment = u32::try_from(self.layout.segment_count()).unwrap();
-        let lc_dylib = u32::try_from(self.layout.required_library_ids().len()).unwrap();
-        let lc_symtab = 1_u32;
-
-        lc_segment + lc_dylib + lc_symtab
-    }
-
-    pub fn load_command_size(&self) -> u32 {
-        u32::try_from(self.layout.header_size() - F::file_header_size(self.target)).unwrap()
     }
 
     pub fn section_idx_of(&self, id: SectionId) -> Option<u8> {

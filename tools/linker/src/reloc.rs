@@ -1,6 +1,6 @@
-use crate::{FileFormat, Layout, RelocationTarget};
+use crate::{CustomEntry, Layout, RelocationTarget};
 
-impl<F: FileFormat> Layout<'_, F> {
+impl<C: CustomEntry> Layout<'_, C> {
     pub(crate) fn apply_relocations(&mut self) {
         let merged_section_ids = self.db.merged_sections().map(|sec| sec.id).collect::<Vec<_>>();
 
@@ -15,8 +15,8 @@ impl<F: FileFormat> Layout<'_, F> {
                     let reloc_offset = usize::try_from(relocation.address).unwrap();
                     let target_address = match relocation.target {
                         RelocationTarget::Absolute => relocation.address,
-                        RelocationTarget::Symbol(symbol_id) => 0xDEAD_BEEF_DEAD_BEEF,
-                        RelocationTarget::Section(section_id) => 0xDEAD_BEEF_DEAD_BEEF,
+                        RelocationTarget::Symbol(symbol_id) => self.vaddr_of_symbol(symbol_id),
+                        RelocationTarget::Section(section_id) => self.vaddr_of_unmerged_section(section_id),
                     };
 
                     let target_address = target_address.checked_add_signed(relocation.addend).unwrap_or_else(|| {
@@ -29,7 +29,10 @@ impl<F: FileFormat> Layout<'_, F> {
                     let section = self.db.section_mut(section_id);
                     let target_address_bytes = target_address.to_ne_bytes();
 
-                    println!("[{}] apply reloc at {reloc_offset}", section.name);
+                    println!(
+                        "[{}] apply reloc at {reloc_offset}, {} bytes => 0x{target_address:016x}",
+                        section.name, relocation.length,
+                    );
 
                     section.data[reloc_offset..reloc_offset + relocation.length as usize]
                         .copy_from_slice(&target_address_bytes[..relocation.length as usize]);

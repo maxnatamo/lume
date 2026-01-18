@@ -1,4 +1,5 @@
-use std::marker::PhantomData;
+use std::fmt::Debug;
+use std::hash::Hash;
 
 use indexmap::{IndexMap, IndexSet};
 
@@ -11,6 +12,7 @@ pub const MACOS_PAGE_ZERO_NAME: &str = "__PAGEZERO";
 /// Default page zero size for the linker (only used on macOS).
 pub const MACOS_PAGE_ZERO_SIZE: u64 = 0x0000_0001_0000_0000;
 
+/*
 pub(crate) trait FileFormat {
     /// Gets the size of a file header for the given target, in bytes.
     fn file_header_size(target: Target) -> usize;
@@ -58,22 +60,312 @@ pub(crate) struct AdditionalHeader {
 pub(crate) struct AdditionalData {
     pub(crate) name: &'static str,
     pub(crate) size: u64,
+} */
+
+#[derive(Hash, Debug, Clone, PartialEq, Eq)]
+pub(super) enum Entry<C: CustomEntry> {
+    /// Header for the file format.
+    FileHeader,
+
+    /// Header for a single segment with the given name.
+    SegmentHeader(String),
+
+    /// Header for a single section with the given ID.
+    SectionHeader(MergedSectionId),
+
+    /// Data for a single section with the given ID.
+    SectionData(MergedSectionId),
+
+    /// Relocations for a single section with the given ID.
+    Relocations(MergedSectionId),
+
+    /// Table of all symbols in the file
+    SymbolTable,
+
+    /// Table of all interned strings in the file
+    StringTable,
+
+    /// Custom section kind
+    Custom(C),
 }
 
-pub(crate) struct Layout<'db, F: FileFormat> {
+pub(crate) trait CustomEntry: Hash + Debug + Clone + PartialEq + Eq {
+    /// Gets the physical size of the entry within the file.
+    fn physical_size(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64;
+
+    /// Gets the virtual size of the entry when mapped into memory.
+    fn virtual_size(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64 {
+        Self::physical_size(entry, builder)
+    }
+
+    /// Gets the requirement alignment of the entry.
+    fn alignment(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64 {
+        match entry {
+            Entry::FileHeader => 1,
+            Entry::SegmentHeader(_) | Entry::SectionHeader(_) | Entry::Relocations(_) => 8,
+            Entry::SectionData(section_id) => builder.db.merged_section(*section_id).alignment as u64,
+            Entry::StringTable | Entry::SymbolTable | Entry::Custom(_) => 4,
+        }
+    }
+}
+
+pub(crate) struct LayoutBuilder<'db, C: CustomEntry> {
     pub(crate) target: Target,
     pub(crate) db: &'db mut Database,
     pub(crate) index: &'db Index,
 
-    extra_headers: IndexMap<&'static str, AdditionalHeader>,
-    extra_data: IndexMap<&'static str, AdditionalData>,
-
-    pub(crate) string_table: IndexSet<String>,
-    pub(crate) string_table_offsets: IndexMap<String, usize>,
-
-    _marker: PhantomData<F>,
+    entries: IndexSet<Entry<C>>,
 }
 
+impl<'db, C: CustomEntry> LayoutBuilder<'db, C> {
+    /// Creates a new layout builder for the given target.
+    pub(crate) fn new(target: Target, db: &'db mut Database, index: &'db Index) -> Self {
+        Self {
+            target,
+            db,
+            index,
+            entries: IndexSet::new(),
+        }
+    }
+
+    /// Declares a new entry with the given kind.
+    pub(crate) fn declare_entry(&mut self, kind: Entry<C>) {
+        self.entries.insert(kind);
+    }
+
+    /// Gets an iterator over all segment names in the layout.
+    pub(crate) fn segments(&self) -> impl Iterator<Item = &str> {
+        self.db.merged_segments.keys().map(|s| s.as_str())
+    }
+
+    /// Gets a set of all required library IDs.
+    pub(crate) fn required_library_ids(&self) -> IndexSet<LibraryId> {
+        self.index.dynamic_symbols.values().copied().collect::<IndexSet<_>>()
+    }
+
+    /// Gets the physical size of the section with the given ID, in bytes.
+    ///
+    /// If the end of the section boundary was not on a aligned boundary,
+    /// the size will be rounded up to the next aligned boundary.
+    pub(crate) fn size_of_section(&self, id: MergedSectionId) -> u64 {
+        let merged_section = self.db.merged_section(id);
+        if !merged_section.occupies_space() {
+            return 0;
+        }
+
+        align_to(merged_section.size, merged_section.alignment as u64)
+    }
+
+    /// Gets the physical size of the section with the given ID, in bytes.
+    pub(crate) fn size_of_segment(&self, name: &str) -> u64 {
+        if self.target.has_page_zero() && name == crate::MACOS_PAGE_ZERO_NAME {
+            return 0;
+        }
+
+        self.db
+            .sections_in_segment(name)
+            .map(|id| self.size_of_section(id))
+            .sum()
+    }
+
+    /// Gets the virtual size of the section with the given ID, in bytes.
+    pub(crate) fn vmsize_of_segment(&self, name: &str) -> u64 {
+        if self.target.has_page_zero() && name == crate::MACOS_PAGE_ZERO_NAME {
+            return crate::MACOS_PAGE_ZERO_SIZE;
+        }
+
+        self.db
+            .sections_in_segment(name)
+            .map(|id| self.size_of_section(id))
+            .sum()
+    }
+
+    /// Consumes the builder and creates a new [`Layout`].
+    pub(crate) fn into_layout(mut self) -> Layout<'db, C> {
+        let mut entries = IndexMap::new();
+
+        let mut physical_offset = 0;
+        let mut virtual_offset = 0;
+
+        for entry in std::mem::take(&mut self.entries) {
+            let alignment = C::alignment(&entry, &self);
+
+            let physical_size = C::physical_size(&entry, &self);
+            let virtual_size = C::virtual_size(&entry, &self);
+
+            let entry_poffset = align_to(physical_offset, alignment);
+            let entry_voffset = align_to(virtual_offset, alignment);
+
+            entries.insert(entry, EntryMetadata {
+                physical_size,
+                virtual_size,
+                physical_offset: entry_poffset,
+                virtual_offset: entry_voffset,
+                alignment,
+            });
+
+            physical_offset = entry_poffset + physical_size;
+            virtual_offset = entry_voffset + virtual_size;
+        }
+
+        Layout {
+            target: self.target,
+            db: self.db,
+            index: self.index,
+            entries,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EntryMetadata {
+    /// Defines the physical size of the entry in the output file.
+    pub(crate) physical_size: u64,
+
+    /// Defines the virtual size of the entry when loaded into memory.
+    pub(crate) virtual_size: u64,
+
+    /// Defines the offset of the entry in the output file.
+    pub(crate) physical_offset: u64,
+
+    /// Defines the virtual address of the entry when loaded into memory.
+    pub(crate) virtual_offset: u64,
+
+    /// Defines the alignment of the entry.
+    pub(crate) alignment: u64,
+}
+
+pub(crate) struct Layout<'db, C: CustomEntry> {
+    pub(crate) target: Target,
+    pub(crate) db: &'db mut Database,
+    pub(crate) index: &'db Index,
+
+    entries: IndexMap<Entry<C>, EntryMetadata>,
+}
+
+impl<'db, C: CustomEntry> Layout<'db, C> {
+    /// Gets an iterator over all entries in the layout.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&Entry<C>, &EntryMetadata)> {
+        self.entries.iter()
+    }
+
+    /// Clones the entries from the layout and returns them.
+    pub(crate) fn clone_entries(&self) -> IndexMap<Entry<C>, EntryMetadata> {
+        self.entries.clone()
+    }
+
+    /// Gets a set of all required library IDs.
+    pub(crate) fn required_library_ids(&self) -> IndexSet<LibraryId> {
+        self.index.dynamic_symbols.values().copied().collect::<IndexSet<_>>()
+    }
+
+    /// Gets the physical size of the given entry in the output file.
+    pub(crate) fn size_of_entry(&self, entry: &Entry<C>) -> u64 {
+        self.entries.get(entry).unwrap().physical_size
+    }
+
+    /// Gets the virtual size of the given entry when loaded into memory.
+    pub(crate) fn vmsize_of_entry(&self, entry: &Entry<C>) -> u64 {
+        self.entries.get(entry).unwrap().virtual_size
+    }
+
+    /// Gets the physical offset of the given entry in the output file.
+    pub(crate) fn offset_of_entry(&self, entry: &Entry<C>) -> u64 {
+        self.entries.get(entry).unwrap().physical_offset
+    }
+
+    /// Gets the physical offset of the given entry in the output file.
+    pub(crate) fn vaddr_of_entry(&self, entry: &Entry<C>) -> u64 {
+        self.entries.get(entry).unwrap().virtual_offset
+    }
+
+    /// Gets the alignment of the given entry in the output file.
+    pub(crate) fn alignment_of_entry(&self, entry: &Entry<C>) -> u64 {
+        self.entries.get(entry).unwrap().alignment
+    }
+}
+
+impl<C: CustomEntry> Layout<'_, C> {
+    /// Gets the physical size of the section with the given ID, in bytes.
+    ///
+    /// If the end of the section boundary was not on a aligned boundary,
+    /// the size will be rounded up to the next aligned boundary.
+    pub(crate) fn size_of_section(&self, id: MergedSectionId) -> u64 {
+        let merged_section = self.db.merged_section(id);
+        if !merged_section.occupies_space() {
+            return 0;
+        }
+
+        align_to(merged_section.size, merged_section.alignment as u64)
+    }
+
+    /// Gets the physical size of the section with the given ID, in bytes.
+    pub(crate) fn size_of_segment(&self, name: &str) -> u64 {
+        if self.target.has_page_zero() && name == crate::MACOS_PAGE_ZERO_NAME {
+            return 0;
+        }
+
+        self.db
+            .sections_in_segment(name)
+            .map(|id| self.size_of_section(id))
+            .sum()
+    }
+
+    /// Gets the virtual size of the section with the given ID, in bytes.
+    pub(crate) fn vmsize_of_segment(&self, name: &str) -> u64 {
+        if self.target.has_page_zero() && name == crate::MACOS_PAGE_ZERO_NAME {
+            return crate::MACOS_PAGE_ZERO_SIZE;
+        }
+
+        self.db
+            .sections_in_segment(name)
+            .map(|id| self.size_of_section(id))
+            .sum()
+    }
+
+    /// Gets the merging section of the section with the given ID, along with
+    /// the index inside the merged section.
+    pub(crate) fn merging_section_of(&self, id: SectionId) -> (&MergedSection, usize) {
+        self.db
+            .merged_sections
+            .values()
+            .find_map(|merged| merged.merged_from.get_index_of(&id).map(|idx| (merged, idx)))
+            .unwrap()
+    }
+
+    /// Gets the virtual address of the symbol with the given ID when loaded
+    /// into memory.
+    pub(crate) fn vaddr_of_symbol(&self, id: SymbolId) -> u64 {
+        let symbol = self.db.symbol(id).unwrap();
+
+        let Some(section_id) = symbol.section else {
+            return symbol.address as u64;
+        };
+
+        let section_vaddr = self.vaddr_of_unmerged_section(section_id);
+        let symbol_addr = symbol.address as u64;
+
+        section_vaddr + symbol_addr
+    }
+
+    /// Gets the virtual address of the unmerged section with the given ID when
+    /// loaded into memory.
+    pub(crate) fn vaddr_of_unmerged_section(&self, id: SectionId) -> u64 {
+        let (merged_section, nested_idx) = self.merging_section_of(id);
+        let merged_vaddr = self.vaddr_of_entry(&Entry::SectionData(merged_section.id));
+
+        let mut section_vaddr = merged_vaddr;
+
+        for contained_section_id in merged_section.merged_from.iter().take(nested_idx + 1) {
+            let contained_section = self.db.section(*contained_section_id);
+            section_vaddr += contained_section.data.len() as u64;
+        }
+
+        section_vaddr
+    }
+}
+
+/*
 impl<'db, F: FileFormat> Layout<'db, F> {
     /// Creates a new layout for the given target.
     pub(crate) fn new(target: Target, db: &'db mut Database, index: &'db Index) -> Self {
@@ -320,6 +612,7 @@ impl<F: FileFormat> Layout<'_, F> {
         self.string_table_offsets.insert(string, offset);
     }
 }
+*/
 
 pub(crate) fn align_to(addr: u64, align: u64) -> u64 {
     if align == 0 {

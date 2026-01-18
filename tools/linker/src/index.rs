@@ -95,12 +95,12 @@ impl Linker {
                 size: 0,
                 alignment: 0,
                 kind: section.kind,
-                merged_from: Vec::new(),
+                merged_from: IndexSet::new(),
             });
 
             merged_section.size += section.data.len() as u64;
             merged_section.alignment = merged_section.alignment.max(section.alignment);
-            merged_section.merged_from.push(section.id);
+            merged_section.merged_from.insert(section.id);
         }
 
         self.db.merged_segments = segments;

@@ -63,7 +63,7 @@ where
     linker.add_pagezero_segment();
 
     let mut writer = write::MemoryWriter::new();
-    write::emit_to(&mut writer, linker.target, &mut linker.db, &linker.index)?;
+    write::write_to(&mut writer, linker.target, &mut linker.db, &linker.index)?;
 
     Ok(writer.into_inner())
 }
@@ -137,6 +137,17 @@ impl Database {
 
     pub fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
         self.objects.get(&id.object)?.symbols.get(&id)
+    }
+
+    /// Gets an iterator over the sections in the given segment.
+    pub fn sections_in_segment(&self, segment: &str) -> impl Iterator<Item = MergedSectionId> {
+        static EMPTY: &indexmap::set::Slice<MergedSectionId> = indexmap::set::Slice::new();
+
+        self.merged_segments
+            .get(segment)
+            .map_or(EMPTY, |seg| seg.as_slice())
+            .iter()
+            .copied()
     }
 }
 

@@ -164,6 +164,7 @@ fn section_kind_from(section: &object::Section) -> SectionKind {
     match section.kind() {
         object::SectionKind::Text => SectionKind::Text,
         object::SectionKind::Data => SectionKind::Data,
+        object::SectionKind::ReadOnlyString => SectionKind::CStrings,
         _ => SectionKind::Unknown,
     }
 }

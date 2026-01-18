@@ -2,7 +2,7 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::path::PathBuf;
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target {
@@ -235,7 +235,7 @@ pub struct MergedSection {
     pub alignment: usize,
     pub kind: SectionKind,
 
-    pub merged_from: Vec<SectionId>,
+    pub merged_from: IndexSet<SectionId>,
 }
 
 impl MergedSection {
@@ -264,6 +264,9 @@ pub enum SectionKind {
 
     /// Zero-filled section.
     ZeroFilled,
+
+    /// Section of null-terminated strings.
+    CStrings,
 
     /// Metadata section for Lume programs.
     LumeMetadata,
