@@ -70,6 +70,10 @@ pub(crate) struct Arguments {
     /// Name of the entry point symbol
     #[arg(long, value_name = "ENTRY")]
     pub entry: Option<String>,
+
+    /// Initial stack memory size
+    #[arg(long, value_name = "SIZE", value_parser = HexParser)]
+    pub stack_size: Option<u64>,
 }
 
 fn main() {
@@ -80,6 +84,7 @@ fn main() {
         entry: args.entry,
         search_paths: None,
         libraries: Vec::new(),
+        stack_size: args.stack_size,
     };
 
     dcx.with_opt(|_dcx| {

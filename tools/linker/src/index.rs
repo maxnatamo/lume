@@ -12,6 +12,13 @@ pub(crate) struct Index {
     pub(crate) sections: IndexMap<SectionName, SectionId>,
 }
 
+impl Index {
+    /// Gets the symbol with the given name, if it exists.
+    pub(crate) fn symbol_with_name(&self, name: &str) -> Option<SymbolId> {
+        self.symbols.get(name).copied()
+    }
+}
+
 impl Linker {
     /// Indexes all the symbols and sections within the linker and keys them by
     /// name.

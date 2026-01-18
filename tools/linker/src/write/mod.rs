@@ -1,13 +1,14 @@
 use lume_errors::Result;
 
-use crate::{Database, Format, Index, LayoutBuilder, Target};
+use crate::{Format, LayoutBuilder, Linker};
 
 pub(crate) mod macho;
 
-pub(crate) fn write_to<W: Writer>(writer: &mut W, target: Target, db: &mut Database, index: &Index) -> Result<()> {
-    match target.format {
+pub(crate) fn write_to<W: Writer>(writer: &mut W, linker: &mut Linker) -> Result<()> {
+    match linker.target.format {
         Format::MachO => {
-            let mut builder = LayoutBuilder::<macho::MachoEntry>::new(target, db, index);
+            let mut builder =
+                LayoutBuilder::<macho::MachoEntry>::new(linker.target, &mut linker.db, &linker.index, &linker.config);
             macho::declare_layout(&mut builder);
 
             let mut layout = builder.into_layout();

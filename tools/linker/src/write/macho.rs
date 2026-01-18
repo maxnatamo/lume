@@ -12,6 +12,9 @@ pub(super) enum MachoEntry {
 
     /// Load command for the symbol header
     SymbolTableHeader,
+
+    /// Load command for the entrypoint address
+    Entrypoint,
 }
 
 impl CustomEntry for MachoEntry {
@@ -69,15 +72,16 @@ impl CustomEntry for MachoEntry {
                 dylib_size
             }
             Entry::Custom(MachoEntry::SymbolTableHeader) => size_of::<macho::SymtabCommand<NE>>() as u64,
+            Entry::Custom(MachoEntry::Entrypoint) => size_of::<macho::EntryPointCommand<NE>>() as u64,
         }
     }
 
     fn virtual_size(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64 {
-        if let Entry::SegmentHeader(segment_name) = entry {
-            return builder.vmsize_of_segment(segment_name);
+        match entry {
+            Entry::FileHeader => 0,
+            Entry::SegmentHeader(segment_name) => builder.vmsize_of_segment(segment_name),
+            _ => Self::physical_size(entry, builder),
         }
-
-        Self::physical_size(entry, builder)
     }
 }
 
@@ -99,6 +103,8 @@ pub(super) fn declare_layout(builder: &mut LayoutBuilder<MachoEntry>) {
     for library_id in builder.required_library_ids() {
         builder.declare_entry(Entry::Custom(MachoEntry::DylibHeader(library_id)));
     }
+
+    builder.declare_entry(Entry::Custom(MachoEntry::Entrypoint));
 
     let section_ids: Vec<_> = builder.db.merged_sections().map(|sec| sec.id).collect();
 
@@ -132,6 +138,7 @@ pub(super) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<MachoEntry>)
             Entry::Relocations(_section_id) => unreachable!("mach-o should have no relocations"),
             Entry::StringTable => builder.write_string_table(writer)?,
             Entry::SymbolTable => builder.write_symbol_table(writer)?,
+            Entry::Custom(MachoEntry::Entrypoint) => builder.write_entrypoint(writer)?,
         }
 
         let written_bytes = writer.len() - current_length;
@@ -200,7 +207,10 @@ impl<'db> Builder<'db> {
         fn is_lc_entry(entry: &Entry<MachoEntry>) -> bool {
             matches!(
                 entry,
-                Entry::SegmentHeader(_) | Entry::Custom(MachoEntry::SymbolTableHeader | MachoEntry::DylibHeader(_))
+                Entry::SegmentHeader(_)
+                    | Entry::Custom(
+                        MachoEntry::SymbolTableHeader | MachoEntry::DylibHeader(_) | MachoEntry::Entrypoint
+                    )
             )
         }
 
@@ -222,7 +232,9 @@ impl<'db> Builder<'db> {
                 entry,
                 Entry::SegmentHeader(_)
                     | Entry::SectionHeader(_)
-                    | Entry::Custom(MachoEntry::SymbolTableHeader | MachoEntry::DylibHeader(_))
+                    | Entry::Custom(
+                        MachoEntry::SymbolTableHeader | MachoEntry::DylibHeader(_) | MachoEntry::Entrypoint
+                    )
             )
         }
 
@@ -447,6 +459,26 @@ impl<'db> Builder<'db> {
             writer.write_u16(n_desc)?;
             writer.write_u64(symbol.address as u64)?;
         }
+
+        Ok(())
+    }
+
+    pub fn write_entrypoint<W: Writer>(&self, writer: &mut W) -> Result<()> {
+        let lc_size = size_of::<macho::EntryPointCommand<NE>>();
+
+        writer.write_u32(macho::LC_MAIN)?;
+        writer.write_u32(u32::try_from(lc_size).unwrap())?;
+
+        let entrypoint = self.layout.config.entry.as_deref().unwrap_or(layout::DEFAULT_ENTRY);
+        let Some(entrypoint_id) = self.layout.index.symbol_with_name(entrypoint) else {
+            return Err(SimpleDiagnostic::new(format!("could not find symbol {entrypoint}")).into());
+        };
+
+        let entryoff = self.layout.offset_of_symbol(entrypoint_id).unwrap();
+        let stacksize = self.layout.config.stack_size.unwrap_or(0);
+
+        writer.write_u64(entryoff)?; // entryoff
+        writer.write_u64(stacksize)?; // stacksize
 
         Ok(())
     }

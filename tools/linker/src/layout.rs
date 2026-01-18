@@ -4,7 +4,10 @@ use std::hash::Hash;
 use indexmap::{IndexMap, IndexSet};
 
 use crate::common::*;
-use crate::{Database, Index};
+use crate::{Config, Database, Index};
+
+/// Default entry point symbol name.
+pub const DEFAULT_ENTRY: &str = "_main";
 
 /// Name of the page zero segment on macOS.
 pub const MACOS_PAGE_ZERO_NAME: &str = "__PAGEZERO";
@@ -101,10 +104,14 @@ pub(crate) trait CustomEntry: Hash + Debug + Clone + PartialEq + Eq {
     /// Gets the requirement alignment of the entry.
     fn alignment(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64 {
         match entry {
-            Entry::FileHeader => 1,
-            Entry::SegmentHeader(_) | Entry::SectionHeader(_) | Entry::Relocations(_) => 8,
+            Entry::FileHeader
+            | Entry::SegmentHeader(_)
+            | Entry::SectionHeader(_)
+            | Entry::Relocations(_)
+            | Entry::StringTable
+            | Entry::SymbolTable
+            | Entry::Custom(_) => 1,
             Entry::SectionData(section_id) => builder.db.merged_section(*section_id).alignment as u64,
-            Entry::StringTable | Entry::SymbolTable | Entry::Custom(_) => 4,
         }
     }
 }
@@ -113,17 +120,19 @@ pub(crate) struct LayoutBuilder<'db, C: CustomEntry> {
     pub(crate) target: Target,
     pub(crate) db: &'db mut Database,
     pub(crate) index: &'db Index,
+    pub(crate) config: &'db Config,
 
     entries: IndexSet<Entry<C>>,
 }
 
 impl<'db, C: CustomEntry> LayoutBuilder<'db, C> {
     /// Creates a new layout builder for the given target.
-    pub(crate) fn new(target: Target, db: &'db mut Database, index: &'db Index) -> Self {
+    pub(crate) fn new(target: Target, db: &'db mut Database, index: &'db Index, config: &'db Config) -> Self {
         Self {
             target,
             db,
             index,
+            config,
             entries: IndexSet::new(),
         }
     }
@@ -212,6 +221,7 @@ impl<'db, C: CustomEntry> LayoutBuilder<'db, C> {
             target: self.target,
             db: self.db,
             index: self.index,
+            config: self.config,
             entries,
         }
     }
@@ -239,11 +249,12 @@ pub(crate) struct Layout<'db, C: CustomEntry> {
     pub(crate) target: Target,
     pub(crate) db: &'db mut Database,
     pub(crate) index: &'db Index,
+    pub(crate) config: &'db Config,
 
     entries: IndexMap<Entry<C>, EntryMetadata>,
 }
 
-impl<'db, C: CustomEntry> Layout<'db, C> {
+impl<C: CustomEntry> Layout<'_, C> {
     /// Gets an iterator over all entries in the layout.
     pub(crate) fn entries(&self) -> impl Iterator<Item = (&Entry<C>, &EntryMetadata)> {
         self.entries.iter()
@@ -319,7 +330,7 @@ impl<C: CustomEntry> Layout<'_, C> {
 
         self.db
             .sections_in_segment(name)
-            .map(|id| self.size_of_section(id))
+            .map(|id| self.vmsize_of_entry(&Entry::SectionData(id)))
             .sum()
     }
 
@@ -331,6 +342,22 @@ impl<C: CustomEntry> Layout<'_, C> {
             .values()
             .find_map(|merged| merged.merged_from.get_index_of(&id).map(|idx| (merged, idx)))
             .unwrap()
+    }
+
+    /// Gets the file offset of the symbol with the given ID.
+    pub(crate) fn offset_of_symbol(&self, id: SymbolId) -> Option<u64> {
+        let symbol = self.db.symbol(id).unwrap();
+        let section_id = symbol.section?;
+
+        let (merged_section, nested_idx) = self.merging_section_of(section_id);
+        let mut parent_section_offset = self.offset_of_entry(&Entry::SectionData(merged_section.id));
+
+        for contained_section_id in merged_section.merged_from.iter().take(nested_idx + 1) {
+            let contained_section = self.db.section(*contained_section_id);
+            parent_section_offset += contained_section.data.len() as u64;
+        }
+
+        Some(parent_section_offset + symbol.address as u64)
     }
 
     /// Gets the virtual address of the symbol with the given ID when loaded

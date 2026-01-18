@@ -28,6 +28,9 @@ pub struct Config {
 
     /// List of libraries to link against
     pub libraries: Vec<String>,
+
+    /// Initial stack memory size
+    pub stack_size: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -63,7 +66,7 @@ where
     linker.add_pagezero_segment();
 
     let mut writer = write::MemoryWriter::new();
-    write::write_to(&mut writer, linker.target, &mut linker.db, &linker.index)?;
+    write::write_to(&mut writer, &mut linker)?;
 
     Ok(writer.into_inner())
 }
