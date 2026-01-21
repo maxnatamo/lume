@@ -113,17 +113,6 @@ impl Linker {
         self.db.merged_segments = segments;
         self.db.merged_sections = sections;
     }
-
-    /// Adds the page zero segment to the segment mapping (only on macOS).
-    pub fn add_pagezero_segment(&mut self) {
-        if !self.target.has_page_zero() {
-            return;
-        }
-
-        self.db
-            .merged_segments
-            .shift_insert(0, String::from(crate::MACOS_PAGE_ZERO_NAME), IndexSet::new());
-    }
 }
 
 #[derive(Default)]

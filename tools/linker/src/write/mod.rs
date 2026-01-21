@@ -7,8 +7,7 @@ pub(crate) mod macho;
 pub(crate) fn write_to<W: Writer>(writer: &mut W, linker: &mut Linker) -> Result<()> {
     match linker.target.format {
         Format::MachO => {
-            let mut builder =
-                LayoutBuilder::<macho::MachoEntry>::new(linker.target, &mut linker.db, &linker.index, &linker.config);
+            let mut builder = LayoutBuilder::<macho::MachoEntry>::new(linker);
             macho::declare_layout(&mut builder);
 
             let mut layout = builder.into_layout();

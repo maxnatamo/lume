@@ -63,7 +63,6 @@ where
 
     linker.index_symbols()?;
     linker.merge_sections();
-    linker.add_pagezero_segment();
 
     let mut writer = write::MemoryWriter::new();
     write::write_to(&mut writer, &mut linker)?;

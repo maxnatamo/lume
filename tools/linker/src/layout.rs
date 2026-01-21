@@ -4,66 +4,10 @@ use std::hash::Hash;
 use indexmap::{IndexMap, IndexSet};
 
 use crate::common::*;
-use crate::{Config, Database, Index};
+use crate::{Config, Database, Index, Linker};
 
 /// Default entry point symbol name.
 pub const DEFAULT_ENTRY: &str = "_main";
-
-/// Name of the page zero segment on macOS.
-pub const MACOS_PAGE_ZERO_NAME: &str = "__PAGEZERO";
-
-/// Default page zero size for the linker (only used on macOS).
-pub const MACOS_PAGE_ZERO_SIZE: u64 = 0x0000_0001_0000_0000;
-
-/*
-pub(crate) trait FileFormat {
-    /// Gets the size of a file header for the given target, in bytes.
-    fn file_header_size(target: Target) -> usize;
-
-    /// Gets the size of a segment header for the given target, in bytes.
-    fn segment_header_size(target: Target) -> usize;
-
-    /// Gets the size of a section header for the given target, in bytes.
-    fn section_header_size(target: Target) -> usize;
-
-    /// Declares all the required string table entries.
-    fn string_table(layout: &mut Layout<Self>)
-    where
-        Self: Sized,
-    {
-        let _ = layout;
-    }
-
-    /// Declares any additional headers which might be required for the
-    /// implementing file format.
-    fn additional_headers(layout: &Layout<Self>) -> Option<Vec<AdditionalHeader>>
-    where
-        Self: Sized,
-    {
-        let _ = layout;
-        None
-    }
-
-    /// Declares any additional data blocks which might be required for the
-    /// implementing file format.
-    fn additional_data(layout: &Layout<Self>) -> Option<Vec<AdditionalData>>
-    where
-        Self: Sized,
-    {
-        let _ = layout;
-        None
-    }
-}
-
-pub(crate) struct AdditionalHeader {
-    pub(crate) name: &'static str,
-    pub(crate) size: u64,
-}
-
-pub(crate) struct AdditionalData {
-    pub(crate) name: &'static str,
-    pub(crate) size: u64,
-} */
 
 #[derive(Hash, Debug, Clone, PartialEq, Eq)]
 pub(super) enum Entry<C: CustomEntry> {
@@ -78,9 +22,6 @@ pub(super) enum Entry<C: CustomEntry> {
 
     /// Data for a single section with the given ID.
     SectionData(MergedSectionId),
-
-    /// Relocations for a single section with the given ID.
-    Relocations(MergedSectionId),
 
     /// Table of all symbols in the file
     SymbolTable,
@@ -107,11 +48,35 @@ pub(crate) trait CustomEntry: Hash + Debug + Clone + PartialEq + Eq {
             Entry::FileHeader
             | Entry::SegmentHeader(_)
             | Entry::SectionHeader(_)
-            | Entry::Relocations(_)
             | Entry::StringTable
             | Entry::SymbolTable
             | Entry::Custom(_) => 1,
             Entry::SectionData(section_id) => builder.db.merged_section(*section_id).alignment as u64,
+        }
+    }
+}
+
+pub(crate) trait EntryDisplay<C: CustomEntry> {
+    fn fmt(&self, builder: &Layout<C>, w: &mut dyn std::fmt::Write) -> std::fmt::Result;
+}
+
+impl<C: CustomEntry> EntryDisplay<C> for Entry<C>
+where
+    C: EntryDisplay<C>,
+{
+    fn fmt(&self, builder: &Layout<C>, w: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        match self {
+            Entry::FileHeader => write!(w, "FileHeader"),
+            Entry::SegmentHeader(segment_name) => write!(w, "SegmentHeader, {segment_name}"),
+            Entry::SectionHeader(section_id) => {
+                write!(w, "SectionHeader, {}", builder.db.merged_section(*section_id).name)
+            }
+            Entry::SectionData(section_id) => {
+                write!(w, "SectionData, {}", builder.db.merged_section(*section_id).name)
+            }
+            Entry::SymbolTable => write!(w, "SymbolTable"),
+            Entry::StringTable => write!(w, "StringTable"),
+            Entry::Custom(custom) => EntryDisplay::fmt(custom, builder, w),
         }
     }
 }
@@ -127,12 +92,12 @@ pub(crate) struct LayoutBuilder<'db, C: CustomEntry> {
 
 impl<'db, C: CustomEntry> LayoutBuilder<'db, C> {
     /// Creates a new layout builder for the given target.
-    pub(crate) fn new(target: Target, db: &'db mut Database, index: &'db Index, config: &'db Config) -> Self {
+    pub(crate) fn new(linker: &'db mut Linker) -> Self {
         Self {
-            target,
-            db,
-            index,
-            config,
+            target: linker.target,
+            db: &mut linker.db,
+            index: &linker.index,
+            config: &linker.config,
             entries: IndexSet::new(),
         }
     }
@@ -163,30 +128,6 @@ impl<'db, C: CustomEntry> LayoutBuilder<'db, C> {
         }
 
         align_to(merged_section.size, merged_section.alignment as u64)
-    }
-
-    /// Gets the physical size of the section with the given ID, in bytes.
-    pub(crate) fn size_of_segment(&self, name: &str) -> u64 {
-        if self.target.has_page_zero() && name == crate::MACOS_PAGE_ZERO_NAME {
-            return 0;
-        }
-
-        self.db
-            .sections_in_segment(name)
-            .map(|id| self.size_of_section(id))
-            .sum()
-    }
-
-    /// Gets the virtual size of the section with the given ID, in bytes.
-    pub(crate) fn vmsize_of_segment(&self, name: &str) -> u64 {
-        if self.target.has_page_zero() && name == crate::MACOS_PAGE_ZERO_NAME {
-            return crate::MACOS_PAGE_ZERO_SIZE;
-        }
-
-        self.db
-            .sections_in_segment(name)
-            .map(|id| self.size_of_section(id))
-            .sum()
     }
 
     /// Consumes the builder and creates a new [`Layout`].
@@ -265,11 +206,6 @@ impl<C: CustomEntry> Layout<'_, C> {
         self.entries.clone()
     }
 
-    /// Gets a set of all required library IDs.
-    pub(crate) fn required_library_ids(&self) -> IndexSet<LibraryId> {
-        self.index.dynamic_symbols.values().copied().collect::<IndexSet<_>>()
-    }
-
     /// Gets the physical size of the given entry in the output file.
     pub(crate) fn size_of_entry(&self, entry: &Entry<C>) -> u64 {
         self.entries.get(entry).unwrap().physical_size
@@ -296,44 +232,30 @@ impl<C: CustomEntry> Layout<'_, C> {
     }
 }
 
+impl<C: CustomEntry> std::fmt::Display for Layout<'_, C>
+where
+    C: EntryDisplay<C>,
+{
+    /// Displays the layout of the entries in the standard output.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (entry, metadata) in &self.entries {
+            write!(f, "Entry ")?;
+            EntryDisplay::fmt(entry, self, f)?;
+            writeln!(f)?;
+
+            writeln!(f, "   Alignment:     0x{:02x}", metadata.alignment)?;
+            writeln!(f, "   Phys. offset:  0x{:016x}", metadata.physical_offset)?;
+            writeln!(f, "   Phys. size:    0x{:016x}", metadata.physical_size)?;
+            writeln!(f, "   Virt. address: 0x{:016x}", metadata.virtual_offset)?;
+            writeln!(f, "   Virt. size:    0x{:016x}", metadata.virtual_size)?;
+            writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
 impl<C: CustomEntry> Layout<'_, C> {
-    /// Gets the physical size of the section with the given ID, in bytes.
-    ///
-    /// If the end of the section boundary was not on a aligned boundary,
-    /// the size will be rounded up to the next aligned boundary.
-    pub(crate) fn size_of_section(&self, id: MergedSectionId) -> u64 {
-        let merged_section = self.db.merged_section(id);
-        if !merged_section.occupies_space() {
-            return 0;
-        }
-
-        align_to(merged_section.size, merged_section.alignment as u64)
-    }
-
-    /// Gets the physical size of the section with the given ID, in bytes.
-    pub(crate) fn size_of_segment(&self, name: &str) -> u64 {
-        if self.target.has_page_zero() && name == crate::MACOS_PAGE_ZERO_NAME {
-            return 0;
-        }
-
-        self.db
-            .sections_in_segment(name)
-            .map(|id| self.size_of_section(id))
-            .sum()
-    }
-
-    /// Gets the virtual size of the section with the given ID, in bytes.
-    pub(crate) fn vmsize_of_segment(&self, name: &str) -> u64 {
-        if self.target.has_page_zero() && name == crate::MACOS_PAGE_ZERO_NAME {
-            return crate::MACOS_PAGE_ZERO_SIZE;
-        }
-
-        self.db
-            .sections_in_segment(name)
-            .map(|id| self.vmsize_of_entry(&Entry::SectionData(id)))
-            .sum()
-    }
-
     /// Gets the merging section of the section with the given ID, along with
     /// the index inside the merged section.
     pub(crate) fn merging_section_of(&self, id: SectionId) -> (&MergedSection, usize) {

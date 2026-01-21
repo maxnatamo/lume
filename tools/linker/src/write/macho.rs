@@ -5,7 +5,13 @@ use crate::layout::{Layout, LayoutBuilder};
 use crate::write::Writer;
 use crate::*;
 
-#[derive(Hash, Debug, Clone, Copy, PartialEq, Eq)]
+/// Name of the page zero segment on macOS.
+pub const PAGE_ZERO_NAME: &str = "__PAGEZERO";
+
+/// Default page zero size for the linker (only used on macOS).
+pub const PAGE_ZERO_SIZE: u64 = 0x0000_0001_0000_0000;
+
+#[derive(Hash, Debug, Clone, PartialEq, Eq)]
 pub(super) enum MachoEntry {
     /// Load dynamic library of the given ID
     DylibHeader(LibraryId),
@@ -15,6 +21,16 @@ pub(super) enum MachoEntry {
 
     /// Load command for the entrypoint address
     Entrypoint,
+}
+
+impl EntryDisplay<MachoEntry> for MachoEntry {
+    fn fmt(&self, builder: &Layout<MachoEntry>, w: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        match self {
+            Self::DylibHeader(library_id) => write!(w, "DylibHeader, {}", builder.db.library(*library_id).name),
+            Self::SymbolTableHeader => write!(w, "SymbolTableHeader"),
+            Self::Entrypoint => write!(w, "Entrypoint"),
+        }
+    }
 }
 
 impl CustomEntry for MachoEntry {
@@ -42,7 +58,6 @@ impl CustomEntry for MachoEntry {
                 }
             }
             Entry::SectionData(section_id) => builder.size_of_section(*section_id),
-            Entry::Relocations(_) => 0,
             Entry::SymbolTable => {
                 let nsyms = builder.index.symbols.len() as u64;
                 nsyms * size_of::<macho::Nlist64<NE>>() as u64
@@ -78,15 +93,25 @@ impl CustomEntry for MachoEntry {
 
     fn virtual_size(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64 {
         match entry {
-            Entry::FileHeader => 0,
-            Entry::SegmentHeader(segment_name) => builder.vmsize_of_segment(segment_name),
-            _ => Self::physical_size(entry, builder),
+            Entry::FileHeader
+            | Entry::SectionHeader(_)
+            | Entry::Custom(MachoEntry::DylibHeader(_) | MachoEntry::SymbolTableHeader | MachoEntry::Entrypoint) => 0,
+            Entry::SegmentHeader(segment_name) => {
+                if builder.target.has_page_zero() && segment_name == PAGE_ZERO_NAME {
+                    PAGE_ZERO_SIZE
+                } else {
+                    0
+                }
+            }
+            Entry::SectionData(section_id) => builder.size_of_section(*section_id),
+            Entry::SymbolTable | Entry::StringTable => Self::physical_size(entry, builder),
         }
     }
 }
 
 pub(super) fn declare_layout(builder: &mut LayoutBuilder<MachoEntry>) {
     builder.declare_entry(Entry::FileHeader);
+    builder.declare_entry(Entry::SegmentHeader(String::from(PAGE_ZERO_NAME)));
 
     let segments: Vec<_> = builder.segments().map(ToOwned::to_owned).collect();
     for segment in segments {
@@ -135,7 +160,6 @@ pub(super) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<MachoEntry>)
             Entry::Custom(MachoEntry::SymbolTableHeader) => builder.write_symtab_header(writer)?,
             Entry::Custom(MachoEntry::DylibHeader(lib_id)) => builder.write_dylib_header(*lib_id, writer)?,
             Entry::SectionData(section_id) => builder.write_section_data(*section_id, writer)?,
-            Entry::Relocations(_section_id) => unreachable!("mach-o should have no relocations"),
             Entry::StringTable => builder.write_string_table(writer)?,
             Entry::SymbolTable => builder.write_symbol_table(writer)?,
             Entry::Custom(MachoEntry::Entrypoint) => builder.write_entrypoint(writer)?,
@@ -270,15 +294,20 @@ impl<'db> Builder<'db> {
     pub fn write_segment_header<W: Writer>(&self, segment_name: &str, writer: &mut W) -> Result<()> {
         let entry = Entry::SegmentHeader(segment_name.to_owned());
 
-        let segment_size = self.layout.size_of_segment(segment_name);
-        let segment_vmsize = self.layout.vmsize_of_segment(segment_name);
+        let vaddr = self.layout.vaddr_of_segment(segment_name);
+        let vsize = self.layout.vsize_of_segment(segment_name);
+
+        let fileoff = self.layout.offset_of_entry(&entry);
+        let filesize = self.layout.size_of_segment(segment_name);
 
         let sections = self.layout.db.sections_in_segment(segment_name).collect::<Vec<_>>();
+
+        // Add the size of the segment header itself along with all section
+        // headers within it.
         let mut lc_size = self.layout.size_of_entry(&entry);
 
         for &section in &sections {
-            let section_entry = Entry::SectionHeader(section);
-            lc_size += self.layout.size_of_entry(&section_entry);
+            lc_size += self.layout.size_of_entry(&Entry::SectionHeader(section));
         }
 
         writer.write_u32(macho::LC_SEGMENT_64)?;
@@ -288,11 +317,11 @@ impl<'db> Builder<'db> {
         segment_name_bytes.resize(16, 0);
         writer.write(&segment_name_bytes)?;
 
-        writer.write_u64(self.layout.vaddr_of_entry(&entry))?; // vmaddr
-        writer.write_u64(segment_vmsize)?; // vmsize
+        writer.write_u64(vaddr)?;
+        writer.write_u64(vsize)?;
 
-        writer.write_u64(self.layout.offset_of_entry(&entry))?; // fileoff
-        writer.write_u64(segment_size)?; // filesize
+        writer.write_u64(fileoff)?;
+        writer.write_u64(filesize)?;
 
         let section_prot = match segment_name {
             macho::SEG_PAGEZERO => 0x0000_0000,
@@ -311,7 +340,7 @@ impl<'db> Builder<'db> {
     }
 
     pub fn write_section_header<W: Writer>(&self, section_id: MergedSectionId, writer: &mut W) -> Result<()> {
-        let entry = Entry::SectionHeader(section_id);
+        let data_entry = Entry::SectionData(section_id);
 
         let section = self.layout.db.merged_section(section_id);
         let segment_name = section.name.segment.as_deref().unwrap_or("");
@@ -324,9 +353,13 @@ impl<'db> Builder<'db> {
         segment_name_bytes.resize(16, 0);
         writer.write(&segment_name_bytes)?;
 
-        writer.write_u64(self.layout.vaddr_of_entry(&entry))?; // addr
-        writer.write_u64(self.layout.size_of_entry(&entry))?; // size
-        writer.write_u32(u32::try_from(self.layout.offset_of_entry(&entry)).unwrap())?; // offset
+        let vaddr = self.layout.vaddr_of_entry(&data_entry);
+        let vsize = self.layout.size_of_entry(&data_entry);
+        let offset = self.layout.offset_of_entry(&data_entry);
+
+        writer.write_u64(vaddr)?; // addr
+        writer.write_u64(vsize)?; // size
+        writer.write_u32(u32::try_from(offset).unwrap())?; // offset
         writer.write_u32(section.alignment.ilog2())?; // align
 
         writer.write_u32(0)?; // reloff
@@ -491,5 +524,40 @@ impl<'db> Builder<'db> {
         }
 
         None
+    }
+}
+impl Layout<'_, MachoEntry> {
+    /// Gets the virtual address of the segment with the given name, when loaded
+    /// into memory.
+    pub(crate) fn vaddr_of_segment(&self, name: &str) -> u64 {
+        let Some(first_section_id) = self.db.sections_in_segment(name).next() else {
+            return 0;
+        };
+
+        self.vaddr_of_entry(&Entry::SectionData(first_section_id))
+    }
+
+    /// Gets the physical size of the section with the given ID, in bytes.
+    pub(crate) fn size_of_segment(&self, name: &str) -> u64 {
+        if self.target.has_page_zero() && name == PAGE_ZERO_NAME {
+            return 0;
+        }
+
+        self.db
+            .sections_in_segment(name)
+            .map(|id| self.size_of_entry(&Entry::SectionData(id)))
+            .sum()
+    }
+
+    /// Gets the virtual size of the section with the given ID, in bytes.
+    pub(crate) fn vsize_of_segment(&self, name: &str) -> u64 {
+        if self.target.has_page_zero() && name == PAGE_ZERO_NAME {
+            return PAGE_ZERO_SIZE;
+        }
+
+        self.db
+            .sections_in_segment(name)
+            .map(|id| self.vmsize_of_entry(&Entry::SectionData(id)))
+            .sum()
     }
 }

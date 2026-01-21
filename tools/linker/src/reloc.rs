@@ -29,11 +29,6 @@ impl<C: CustomEntry> Layout<'_, C> {
                     let section = self.db.section_mut(section_id);
                     let target_address_bytes = target_address.to_ne_bytes();
 
-                    println!(
-                        "[{}] apply reloc at {reloc_offset}, {} bytes => 0x{target_address:016x}",
-                        section.name, relocation.length,
-                    );
-
                     section.data[reloc_offset..reloc_offset + relocation.length as usize]
                         .copy_from_slice(&target_address_bytes[..relocation.length as usize]);
                 }
