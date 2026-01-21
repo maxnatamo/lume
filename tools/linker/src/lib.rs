@@ -31,6 +31,9 @@ pub struct Config {
 
     /// Initial stack memory size
     pub stack_size: Option<u64>,
+
+    /// Print the output entries before writing the output file
+    pub print_entries: bool,
 }
 
 #[derive(Clone)]

@@ -7,11 +7,18 @@ pub(crate) mod macho;
 pub(crate) fn write_to<W: Writer>(writer: &mut W, linker: &mut Linker) -> Result<()> {
     match linker.target.format {
         Format::MachO => {
+            let print_entries = linker.config.print_entries;
+
             let mut builder = LayoutBuilder::<macho::MachoEntry>::new(linker);
             macho::declare_layout(&mut builder);
 
             let mut layout = builder.into_layout();
             layout.apply_relocations();
+
+            #[allow(clippy::disallowed_macros, reason = "used for non-logging purposes in the CLI")]
+            if print_entries {
+                println!("{layout}");
+            }
 
             macho::emit_layout(writer, layout)
         }

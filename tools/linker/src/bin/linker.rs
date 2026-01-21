@@ -74,6 +74,10 @@ pub(crate) struct Arguments {
     /// Initial stack memory size
     #[arg(long, value_name = "SIZE", value_parser = HexParser)]
     pub stack_size: Option<u64>,
+
+    /// Print the output entries before writing the output file
+    #[arg(long)]
+    pub print_entries: bool,
 }
 
 fn main() {
@@ -85,6 +89,7 @@ fn main() {
         search_paths: None,
         libraries: Vec::new(),
         stack_size: args.stack_size,
+        print_entries: args.print_entries,
     };
 
     dcx.with_opt(|_dcx| {
