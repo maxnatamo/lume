@@ -111,7 +111,6 @@ impl LibraryId {
 #[derive(Debug, Clone)]
 pub struct Library {
     pub id: LibraryId,
-    pub name: String,
     pub path: PathBuf,
     pub symbols: Vec<DynamicSymbol>,
 }

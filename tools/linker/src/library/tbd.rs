@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::common::*;
 use crate::library::{ParsedDynamicSymbol, ParsedLibrary};
 
-#[derive(Default, Debug, Deserialize, PartialEq)]
+#[derive(Default, Clone, Debug, Deserialize, PartialEq)]
 #[serde(default)]
 struct Document {
     pub targets: Vec<String>,
@@ -14,10 +14,24 @@ struct Document {
     #[serde(rename = "install-name")]
     pub install_name: String,
 
+    #[serde(rename = "parent-umbrella")]
+    pub parent_umbrella: Option<Vec<UmbrellaEntry>>,
+
+    #[serde(default)]
     pub exports: Vec<Exports>,
 }
 
-#[derive(Default, Debug, Deserialize, PartialEq)]
+impl Document {
+    pub fn is_umbrella(&self) -> bool {
+        self.parent_umbrella.is_none()
+    }
+}
+
+#[derive(Default, Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
+struct UmbrellaEntry {}
+
+#[derive(Default, Clone, Debug, Deserialize, PartialEq)]
 #[serde(default)]
 struct Exports {
     pub targets: Vec<String>,
@@ -33,8 +47,10 @@ pub(super) fn read_symbols(lib_path: &Path, target: Target) -> Result<Vec<Parsed
     let tbd_documents = serde_saphyr::from_multiple::<Document>(&tbd_content)
         .map_cause(format!("failed to parse TBD library path: {}", lib_path.display()))?;
 
+    let umbrella = tbd_documents.iter().find(|doc| doc.is_umbrella()).cloned();
+
     for tdb_document in tbd_documents {
-        if let Some(library) = read_symbols_from_entry(tdb_document, target) {
+        if let Some(library) = read_symbols_from_entry(umbrella.as_ref(), tdb_document, target) {
             libs.push(library);
         }
     }
@@ -42,7 +58,7 @@ pub(super) fn read_symbols(lib_path: &Path, target: Target) -> Result<Vec<Parsed
     Ok(libs)
 }
 
-fn read_symbols_from_entry(entry: Document, target: Target) -> Option<ParsedLibrary> {
+fn read_symbols_from_entry(umbrella: Option<&Document>, entry: Document, target: Target) -> Option<ParsedLibrary> {
     let target_name = if target.arch.is_arm() {
         "arm64-macos"
     } else {
@@ -52,9 +68,6 @@ fn read_symbols_from_entry(entry: Document, target: Target) -> Option<ParsedLibr
     if !entry.targets.iter().any(|target| target.as_str() == target_name) {
         return None;
     }
-
-    let path = PathBuf::from(&entry.install_name);
-    let name = entry.install_name;
 
     let mut symbols = Vec::new();
 
@@ -69,5 +82,15 @@ fn read_symbols_from_entry(entry: Document, target: Target) -> Option<ParsedLibr
         }
     }
 
-    Some(ParsedLibrary { name, path, symbols })
+    // If we read the symbol from a library within an umbrella library, use the path
+    // of the containing library instead of the one listed within the entry.
+    //
+    // In practice, this turns library entries such as `libsystem_c.dylib` into
+    // `libSystem.dylib`.
+    let path = match umbrella {
+        Some(umbrella) => PathBuf::from(&umbrella.install_name),
+        None => PathBuf::from(&entry.install_name),
+    };
+
+    Some(ParsedLibrary { path, symbols })
 }

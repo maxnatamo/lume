@@ -12,7 +12,6 @@ mod tbd;
 
 #[derive(Clone)]
 struct ParsedLibrary {
-    pub name: String,
     pub path: PathBuf,
     pub symbols: Vec<ParsedDynamicSymbol>,
 }
@@ -40,7 +39,7 @@ pub(crate) fn read_libraries(config: &Config, target: Target) -> Result<IndexMap
         };
 
         for parsed_lib in read_library_symbols(&lib_path, target)? {
-            let lib_id = LibraryId::new(&parsed_lib.name);
+            let lib_id = LibraryId::new(&parsed_lib.path);
             let mut library_symbols = Vec::new();
 
             for symbol in parsed_lib.symbols {
@@ -50,12 +49,13 @@ pub(crate) fn read_libraries(config: &Config, target: Target) -> Result<IndexMap
                 });
             }
 
-            libraries.insert(lib_id, Library {
+            let entry = libraries.entry(lib_id).or_insert(Library {
                 id: lib_id,
-                name: parsed_lib.name,
                 path: parsed_lib.path,
-                symbols: library_symbols,
+                symbols: Vec::new(),
             });
+
+            entry.symbols.extend(library_symbols);
         }
     }
 

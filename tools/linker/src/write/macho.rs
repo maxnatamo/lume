@@ -26,7 +26,9 @@ pub(super) enum MachoEntry {
 impl EntryDisplay<MachoEntry> for MachoEntry {
     fn fmt(&self, builder: &Layout<MachoEntry>, w: &mut dyn std::fmt::Write) -> std::fmt::Result {
         match self {
-            Self::DylibHeader(library_id) => write!(w, "DylibHeader, {}", builder.db.library(*library_id).name),
+            Self::DylibHeader(library_id) => {
+                write!(w, "DylibHeader, {}", builder.db.library(*library_id).path.display())
+            }
             Self::SymbolTableHeader => write!(w, "SymbolTableHeader"),
             Self::Entrypoint => write!(w, "Entrypoint"),
         }
@@ -81,7 +83,7 @@ impl CustomEntry for MachoEntry {
 
                 let mut dylib_size = 0;
                 dylib_size += size_of::<macho::DylibCommand<NE>>() as u64;
-                dylib_size += library.name.len() as u64 + 1;
+                dylib_size += library.path.display().to_string().len() as u64 + 1;
                 dylib_size = align_to(dylib_size, align_of::<i32>() as u64);
 
                 dylib_size
@@ -406,7 +408,9 @@ impl<'db> Builder<'db> {
 
     pub fn write_dylib_header<W: Writer>(&self, library_id: LibraryId, writer: &mut W) -> Result<()> {
         let library = self.layout.db.library(library_id);
-        let name_size = library.name.len() + 1;
+        let library_path = library.path.display().to_string();
+
+        let name_size = library_path.len() + 1;
 
         let lc_size = size_of::<macho::DylibCommand<NE>>() + name_size;
         let lc_size = align_to(lc_size as u64, align_of::<i32>() as u64);
@@ -420,7 +424,7 @@ impl<'db> Builder<'db> {
         writer.write_u32(0x0000_0000)?; // current_version
         writer.write_u32(0x0000_0000)?; // compatibility_version
 
-        writer.write(library.name.as_bytes())?;
+        writer.write(library_path.as_bytes())?;
         writer.write_u8(0)?;
 
         // `otool` claims the `dylib` commands must be padded to a multiple of 4 bytes
