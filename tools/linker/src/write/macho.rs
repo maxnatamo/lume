@@ -84,7 +84,7 @@ impl CustomEntry for MachoEntry {
                 let mut dylib_size = 0;
                 dylib_size += size_of::<macho::DylibCommand<NE>>() as u64;
                 dylib_size += library.path.display().to_string().len() as u64 + 1;
-                dylib_size = align_to(dylib_size, align_of::<i32>() as u64);
+                dylib_size = align_to(dylib_size, align_of::<u64>() as u64);
 
                 dylib_size
             }
@@ -413,7 +413,7 @@ impl<'db> Builder<'db> {
         let name_size = library_path.len() + 1;
 
         let lc_size = size_of::<macho::DylibCommand<NE>>() + name_size;
-        let lc_size = align_to(lc_size as u64, align_of::<i32>() as u64);
+        let lc_size = align_to(lc_size as u64, align_of::<u64>() as u64);
 
         writer.write_u32(macho::LC_LOAD_DYLIB)?;
         writer.write_u32(u32::try_from(lc_size).unwrap())?;
@@ -427,8 +427,9 @@ impl<'db> Builder<'db> {
         writer.write(library_path.as_bytes())?;
         writer.write_u8(0)?;
 
-        // `otool` claims the `dylib` commands must be padded to a multiple of 4 bytes
-        writer.align_to(align_of::<i32>())?;
+        // `otool` claims the `dylib` commands must be padded to a multiple of 4 bytes,
+        // while `nm` requires padding to a multiple of 8 bytes.
+        writer.align_to(align_of::<u64>())?;
 
         Ok(())
     }
