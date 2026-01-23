@@ -165,7 +165,7 @@ fn parse_objects(inputs: Vec<InputFile<'_>>) -> Result<(IndexMap<InputFileId, Pa
         let id = InputFileId(files.len());
         let file_name = input.path.display().to_string();
 
-        let parsed_objects = match parse::parse(id, &file_name, input.content.as_ref()) {
+        let parsed_objects = match parse::parse_object_file(id, &file_name, input.content.as_ref()) {
             Ok(object) => object,
             Err(err) => {
                 return Err(

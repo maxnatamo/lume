@@ -1,29 +1,98 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::io::Read;
 
 use indexmap::IndexMap;
 use lume_errors::{MapDiagnostic, Result};
 use object::{Object as _, ObjectSection, ObjectSymbol};
 
-use crate::{
-    InputFileId, Linkage, Object, ObjectId, Placement, Relocation, RelocationTarget, InputSectionId, SectionKind, SymbolId,
-};
+use crate::common::*;
 
-mod archive;
+/// Magic number for `.ar` archive files.
+const AR_FILE_MAGIC: [u8; 8] = *b"!<arch>\n";
 
-pub(crate) fn parse<N: Hash, D: AsRef<[u8]>>(file: InputFileId, name: &N, content: D) -> Result<Vec<Object>> {
+#[derive(Clone)]
+pub(crate) enum ObjectFile {
+    /// The parsed file contained a single object file.
+    Single(Object),
+
+    /// The parsed file was an archive containing multiple object files.
+    Archive(Vec<Object>),
+}
+
+impl IntoIterator for ObjectFile {
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+    type Item = Object;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            ObjectFile::Single(object) => vec![object].into_iter(),
+            ObjectFile::Archive(objects) => objects.into_iter(),
+        }
+    }
+}
+
+/// Parses the given input file and returns the parsed object file, depending on
+/// the format of the given content.
+///
+/// If the content uses an `.ar` archive header, the contained objects are
+/// returned as [`ObjectFile::Archive`]. Otherwise, a single object file is
+/// returned as [`ObjectFile::Single`].
+pub(crate) fn parse_object_file<N: Hash, D: AsRef<[u8]>>(
+    file: InputFileId,
+    name: &N,
+    content: D,
+) -> Result<ObjectFile> {
     let content = content.as_ref();
 
-    if archive::is_archive(content) {
-        return archive::parse(file, content);
+    if is_archive(content) {
+        let objects = parse_archive(file, content)?;
+
+        return Ok(ObjectFile::Archive(objects));
     }
 
     let object_file = object::File::parse(content).map_diagnostic()?;
     let object = object_from(file, name, object_file);
 
-    Ok(vec![object])
+    Ok(ObjectFile::Single(object))
 }
 
+/// Determines if the given file content is an archive.
+fn is_archive(content: &[u8]) -> bool {
+    content.starts_with(&AR_FILE_MAGIC)
+}
+
+/// Parses the given archive content and returns the parsed objects.
+fn parse_archive<D>(file: InputFileId, content: D) -> Result<Vec<Object>>
+where
+    D: AsRef<[u8]>,
+{
+    let mut archive = ar::Archive::new(content.as_ref());
+    let mut objects = Vec::new();
+
+    while let Some(entry) = archive.next_entry() {
+        let mut entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                return Err(lume_errors::SimpleDiagnostic::new("could not parse archive entry")
+                    .add_cause(err)
+                    .into());
+            }
+        };
+
+        let name = entry.header().identifier().to_vec();
+
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf)?;
+
+        let entry_object = parse_object_file(file, &name, &buf)?;
+        objects.extend(entry_object);
+    }
+
+    Ok(objects)
+}
+
+/// Converts a [`object::File`] instance into an [`Object`] instance.
 fn object_from<N: Hash>(file: InputFileId, name: &N, object: object::File) -> Object {
     let mut sections = IndexMap::new();
     let mut symbols = IndexMap::new();
@@ -150,6 +219,8 @@ fn object_from<N: Hash>(file: InputFileId, name: &N, object: object::File) -> Ob
     }
 }
 
+/// Determines the kind of section depending on the name and/or declared section
+/// attributes.
 fn section_kind_from(section: &object::Section) -> SectionKind {
     let segment_name = section.segment_name().expect("segment name not UTF-8");
     let section_name = section.name().expect("section name not UTF-8");
