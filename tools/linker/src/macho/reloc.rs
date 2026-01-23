@@ -2,13 +2,13 @@ use crate::{Layout, RelocationTarget};
 
 impl Layout<'_, super::Entry> {
     pub(crate) fn apply_relocations(&mut self) {
-        let merged_section_ids = self.db.merged_sections().map(|sec| sec.id).collect::<Vec<_>>();
+        let output_section_ids = self.db.output_sections().map(|sec| sec.id).collect::<Vec<_>>();
 
-        for merged_section_id in merged_section_ids {
-            let section_ids = self.db.merged_section(merged_section_id).merged_from.clone();
+        for output_section_id in output_section_ids {
+            let input_section_ids = self.db.output_section(output_section_id).merged_from.clone();
 
-            for section_id in section_ids {
-                let section = self.db.section(section_id);
+            for input_section_id in input_section_ids {
+                let section = self.db.input_section(input_section_id);
                 let relocations = section.relocations.clone();
 
                 for relocation in relocations {
@@ -26,7 +26,7 @@ impl Layout<'_, super::Entry> {
                         )
                     });
 
-                    let section = self.db.section_mut(section_id);
+                    let section = self.db.input_section_mut(input_section_id);
                     let target_address_bytes = target_address.to_ne_bytes();
 
                     section.data[reloc_offset..reloc_offset + relocation.length as usize]

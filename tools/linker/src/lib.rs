@@ -93,8 +93,8 @@ struct Database {
     libraries: IndexMap<LibraryId, Library>,
     files: IndexMap<InputFileId, PathBuf>,
 
-    merged_segments: IndexMap<String, IndexSet<MergedSectionId>>,
-    merged_sections: IndexMap<MergedSectionId, MergedSection>,
+    output_segments: IndexMap<String, IndexSet<OutputSectionId>>,
+    output_sections: IndexMap<OutputSectionId, OutputSection>,
 }
 
 impl Database {
@@ -110,27 +110,27 @@ impl Database {
         self.libraries.get(&id).unwrap()
     }
 
-    pub fn section(&self, id: SectionId) -> &Section {
+    pub fn input_section(&self, id: InputSectionId) -> &InputSection {
         self.object(id.object).sections.get(&id).unwrap()
     }
 
-    pub fn section_mut(&mut self, id: SectionId) -> &mut Section {
+    pub fn input_section_mut(&mut self, id: InputSectionId) -> &mut InputSection {
         self.object_mut(id.object).sections.get_mut(&id).unwrap()
     }
 
-    pub fn sections(&self) -> impl Iterator<Item = &Section> {
+    pub fn input_sections(&self) -> impl Iterator<Item = &InputSection> {
         self.objects.values().flat_map(|object| object.sections.values())
     }
 
-    pub fn merged_section(&self, id: MergedSectionId) -> &MergedSection {
-        self.merged_sections.get(&id).unwrap()
+    pub fn output_section(&self, id: OutputSectionId) -> &OutputSection {
+        self.output_sections.get(&id).unwrap()
     }
 
-    pub fn merged_sections(&self) -> impl Iterator<Item = &MergedSection> {
-        self.merged_segments
+    pub fn output_sections(&self) -> impl Iterator<Item = &OutputSection> {
+        self.output_segments
             .values()
             .flatten()
-            .map(|&id| self.merged_section(id))
+            .map(|&id| self.output_section(id))
     }
 
     pub fn symbols(&self) -> impl Iterator<Item = &Symbol> {
@@ -146,10 +146,10 @@ impl Database {
     }
 
     /// Gets an iterator over the sections in the given segment.
-    pub fn sections_in_segment(&self, segment: &str) -> impl Iterator<Item = MergedSectionId> {
-        static EMPTY: &indexmap::set::Slice<MergedSectionId> = indexmap::set::Slice::new();
+    pub fn sections_in_segment(&self, segment: &str) -> impl Iterator<Item = OutputSectionId> {
+        static EMPTY: &indexmap::set::Slice<OutputSectionId> = indexmap::set::Slice::new();
 
-        self.merged_segments
+        self.output_segments
             .get(segment)
             .map_or(EMPTY, |seg| seg.as_slice())
             .iter()

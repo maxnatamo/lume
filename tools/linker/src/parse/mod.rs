@@ -6,7 +6,7 @@ use lume_errors::{MapDiagnostic, Result};
 use object::{Object as _, ObjectSection, ObjectSymbol};
 
 use crate::{
-    InputFileId, Linkage, Object, ObjectId, Placement, Relocation, RelocationTarget, SectionId, SectionKind, SymbolId,
+    InputFileId, Linkage, Object, ObjectId, Placement, Relocation, RelocationTarget, InputSectionId, SectionKind, SymbolId,
 };
 
 mod archive;
@@ -44,10 +44,10 @@ fn object_from<N: Hash>(file: InputFileId, name: &N, object: object::File) -> Ob
         let data = obj_section.data().unwrap().to_vec();
         let kind = section_kind_from(&obj_section);
 
-        let id = SectionId::from_name(object_id, segment_name, section_name);
+        let id = InputSectionId::from_name(object_id, segment_name, section_name);
         section_mapping.insert(obj_section.index(), id);
 
-        sections.insert(id, crate::Section {
+        sections.insert(id, crate::InputSection {
             id,
             segment: segment_name.map(|name| name.to_owned()),
             name: section_name.to_owned(),

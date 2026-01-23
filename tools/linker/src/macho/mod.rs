@@ -20,10 +20,10 @@ pub(crate) enum Entry {
     SegmentHeader(String),
 
     /// Header for a single section with the given ID.
-    SectionHeader(MergedSectionId),
+    SectionHeader(OutputSectionId),
 
     /// Data for a single section with the given ID.
-    SectionData(MergedSectionId),
+    SectionData(OutputSectionId),
 
     /// Table of all symbols in the file
     SymbolTable,
@@ -128,7 +128,7 @@ impl SizedEntry for Entry {
             | Entry::DylibHeader(_)
             | Entry::SymbolTableHeader
             | Entry::Entrypoint => 1,
-            Entry::SectionData(section_id) => builder.db.merged_section(*section_id).alignment as u64,
+            Entry::SectionData(section_id) => builder.db.output_section(*section_id).alignment as u64,
         }
     }
 }
@@ -139,10 +139,10 @@ impl EntryDisplay for Entry {
             Self::FileHeader => write!(w, "FileHeader"),
             Self::SegmentHeader(segment_name) => write!(w, "SegmentHeader, {segment_name}"),
             Self::SectionHeader(section_id) => {
-                write!(w, "SectionHeader, {}", builder.db.merged_section(*section_id).name)
+                write!(w, "SectionHeader, {}", builder.db.output_section(*section_id).name)
             }
             Self::SectionData(section_id) => {
-                write!(w, "SectionData, {}", builder.db.merged_section(*section_id).name)
+                write!(w, "SectionData, {}", builder.db.output_section(*section_id).name)
             }
             Self::SymbolTable => write!(w, "SymbolTable"),
             Self::StringTable => write!(w, "StringTable"),
@@ -195,11 +195,11 @@ impl Layout<'_, Entry> {
         let symbol = self.db.symbol(id).unwrap();
         let section_id = symbol.section?;
 
-        let (merged_section, nested_idx) = self.merging_section_of(section_id);
+        let (merged_section, nested_idx) = self.input_section_of(section_id);
         let mut parent_section_offset = self.offset_of_entry(&Entry::SectionData(merged_section.id));
 
         for contained_section_id in merged_section.merged_from.iter().take(nested_idx + 1) {
-            let contained_section = self.db.section(*contained_section_id);
+            let contained_section = self.db.input_section(*contained_section_id);
             parent_section_offset += contained_section.data.len() as u64;
         }
 
@@ -223,14 +223,14 @@ impl Layout<'_, Entry> {
 
     /// Gets the virtual address of the unmerged section with the given ID when
     /// loaded into memory.
-    pub(crate) fn vaddr_of_unmerged_section(&self, id: SectionId) -> u64 {
-        let (merged_section, nested_idx) = self.merging_section_of(id);
+    pub(crate) fn vaddr_of_unmerged_section(&self, id: InputSectionId) -> u64 {
+        let (merged_section, nested_idx) = self.input_section_of(id);
         let merged_vaddr = self.vaddr_of_entry(&Entry::SectionData(merged_section.id));
 
         let mut section_vaddr = merged_vaddr;
 
         for contained_section_id in merged_section.merged_from.iter().take(nested_idx + 1) {
-            let contained_section = self.db.section(*contained_section_id);
+            let contained_section = self.db.input_section(*contained_section_id);
             section_vaddr += contained_section.data.len() as u64;
         }
 

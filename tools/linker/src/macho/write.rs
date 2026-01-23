@@ -29,7 +29,7 @@ pub(crate) fn declare_layout(builder: &mut LayoutBuilder<Entry>) {
 
     builder.declare_entry(Entry::Entrypoint);
 
-    let section_ids: Vec<_> = builder.db.merged_sections().map(|sec| sec.id).collect();
+    let section_ids: Vec<_> = builder.db.output_sections().map(|sec| sec.id).collect();
 
     for section_id in section_ids.iter().copied() {
         builder.declare_entry(Entry::SectionData(section_id));
@@ -263,7 +263,7 @@ impl<'db> Builder<'db> {
         let mut filesize = self.layout.size_of_segment(segment_name);
 
         if segment_name == macho::SEG_TEXT {
-            let first_section = self.layout.db.merged_sections().next();
+            let first_section = self.layout.db.output_sections().next();
             let first_section_id = first_section.expect("expected at least one section").id;
 
             // Get the offset of the first section in the __TEXT segment, which
@@ -304,10 +304,10 @@ impl<'db> Builder<'db> {
         Ok(())
     }
 
-    pub fn write_section_header<W: Writer>(&self, section_id: MergedSectionId, writer: &mut W) -> Result<()> {
+    pub fn write_section_header<W: Writer>(&self, section_id: OutputSectionId, writer: &mut W) -> Result<()> {
         let data_entry = Entry::SectionData(section_id);
 
-        let section = self.layout.db.merged_section(section_id);
+        let section = self.layout.db.output_section(section_id);
         let segment_name = section.name.segment.as_deref().unwrap_or("");
 
         let mut section_name_bytes = section.name.section.as_bytes().to_vec();
@@ -397,11 +397,11 @@ impl<'db> Builder<'db> {
         Ok(())
     }
 
-    pub fn write_section_data<W: Writer>(&self, id: MergedSectionId, writer: &mut W) -> Result<()> {
-        let section = self.layout.db.merged_section(id);
+    pub fn write_section_data<W: Writer>(&self, id: OutputSectionId, writer: &mut W) -> Result<()> {
+        let section = self.layout.db.output_section(id);
 
         for &contained_section_id in &section.merged_from {
-            let contained_section = self.layout.db.section(contained_section_id);
+            let contained_section = self.layout.db.input_section(contained_section_id);
             writer.write(&contained_section.data)?;
         }
 
@@ -484,8 +484,8 @@ impl<'db> Builder<'db> {
         Ok(())
     }
 
-    pub fn section_idx_of(&self, id: SectionId) -> Option<u8> {
-        for (idx, merged_section) in self.layout.db.merged_sections().enumerate() {
+    pub fn section_idx_of(&self, id: InputSectionId) -> Option<u8> {
+        for (idx, merged_section) in self.layout.db.output_sections().enumerate() {
             if merged_section.merged_from.contains(&id) {
                 return Some(u8::try_from(idx).unwrap() + 1);
             }

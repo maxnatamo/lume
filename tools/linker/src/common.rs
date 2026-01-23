@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use indexmap::{IndexMap, IndexSet};
 
+/// Representation of a target which is expected to run the linked executables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target {
     pub arch: Architecture,
@@ -84,6 +85,8 @@ impl ObjectId {
     }
 }
 
+/// Represents an object file which is being linked, along with zero-or-more
+/// other object files and libraries.
 #[derive(Clone)]
 pub struct Object {
     pub id: ObjectId,
@@ -95,7 +98,7 @@ pub struct Object {
     pub file: InputFileId,
 
     pub format: Format,
-    pub sections: IndexMap<SectionId, Section>,
+    pub sections: IndexMap<InputSectionId, InputSection>,
     pub symbols: IndexMap<SymbolId, Symbol>,
 }
 
@@ -132,12 +135,12 @@ impl Display for SectionName {
 }
 
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
-pub struct SectionId {
+pub struct InputSectionId {
     pub object: ObjectId,
     pub id: usize,
 }
 
-impl SectionId {
+impl InputSectionId {
     pub fn from_name(object: ObjectId, segment_name: Option<&str>, section_name: &str) -> Self {
         Self {
             object,
@@ -147,8 +150,8 @@ impl SectionId {
 }
 
 #[derive(Clone)]
-pub struct Section {
-    pub id: SectionId,
+pub struct InputSection {
+    pub id: InputSectionId,
 
     pub name: String,
     pub segment: Option<String>,
@@ -184,7 +187,7 @@ pub struct Symbol {
     pub address: usize,
     pub size: usize,
     pub linkage: Linkage,
-    pub section: Option<SectionId>,
+    pub section: Option<InputSectionId>,
 }
 
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
@@ -212,21 +215,21 @@ pub struct Relocation {
 pub enum RelocationTarget {
     Absolute,
     Symbol(SymbolId),
-    Section(SectionId),
+    Section(InputSectionId),
 }
 
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
-pub struct MergedSectionId(usize);
+pub struct OutputSectionId(usize);
 
-impl MergedSectionId {
+impl OutputSectionId {
     pub fn from_name(segment_name: Option<&str>, section_name: &str) -> Self {
         Self(lume_span::hash_id(&(segment_name, section_name)))
     }
 }
 
 #[derive(Clone)]
-pub struct MergedSection {
-    pub id: MergedSectionId,
+pub struct OutputSection {
+    pub id: OutputSectionId,
     pub name: SectionName,
     pub placement: Option<Placement>,
 
@@ -234,10 +237,12 @@ pub struct MergedSection {
     pub alignment: usize,
     pub kind: SectionKind,
 
-    pub merged_from: IndexSet<SectionId>,
+    /// Defines the IDs of the sections which have been merged into this
+    /// output section.
+    pub merged_from: IndexSet<InputSectionId>,
 }
 
-impl MergedSection {
+impl OutputSection {
     /// Determines if the section occupies space in the file.
     pub fn occupies_space(&self) -> bool {
         self.placement.is_some() && self.kind != SectionKind::ZeroFilled

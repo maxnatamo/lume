@@ -9,7 +9,7 @@ pub(crate) struct Index {
     pub(crate) symbols: IndexMap<String, SymbolId>,
     pub(crate) dynamic_symbols: IndexMap<String, LibraryId>,
 
-    pub(crate) sections: IndexMap<SectionName, SectionId>,
+    pub(crate) sections: IndexMap<SectionName, InputSectionId>,
 }
 
 impl Index {
@@ -82,36 +82,36 @@ impl Linker {
 
     /// Merge all sections with the same section names into single sections.
     pub fn merge_sections(&mut self) {
-        let mut segments = IndexMap::<String, IndexSet<MergedSectionId>>::new();
-        let mut sections = IndexMap::<MergedSectionId, MergedSection>::new();
+        let mut segments = IndexMap::<String, IndexSet<OutputSectionId>>::new();
+        let mut sections = IndexMap::<OutputSectionId, OutputSection>::new();
 
-        for section in self.db().sections() {
-            let id = MergedSectionId::from_name(section.segment.as_deref(), &section.name);
+        for input_section in self.db().input_sections() {
+            let id = OutputSectionId::from_name(input_section.segment.as_deref(), &input_section.name);
 
-            if let Some(segment_name) = section.segment.clone() {
+            if let Some(segment_name) = input_section.segment.clone() {
                 segments.entry(segment_name).or_default().insert(id);
             }
 
-            let merged_section = sections.entry(id).or_insert_with(|| MergedSection {
+            let output_section = sections.entry(id).or_insert_with(|| OutputSection {
                 id,
                 name: SectionName {
-                    segment: section.segment.clone(),
-                    section: section.name.clone(),
+                    segment: input_section.segment.clone(),
+                    section: input_section.name.clone(),
                 },
-                placement: section.placement,
+                placement: input_section.placement,
                 size: 0,
                 alignment: 0,
-                kind: section.kind,
+                kind: input_section.kind,
                 merged_from: IndexSet::new(),
             });
 
-            merged_section.size += section.data.len() as u64;
-            merged_section.alignment = merged_section.alignment.max(section.alignment);
-            merged_section.merged_from.insert(section.id);
+            output_section.size += input_section.data.len() as u64;
+            output_section.alignment = output_section.alignment.max(input_section.alignment);
+            output_section.merged_from.insert(input_section.id);
         }
 
-        self.db.merged_segments = segments;
-        self.db.merged_sections = sections;
+        self.db.output_segments = segments;
+        self.db.output_sections = sections;
     }
 }
 
