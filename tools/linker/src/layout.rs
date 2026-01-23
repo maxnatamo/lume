@@ -9,88 +9,36 @@ use crate::{Config, Database, Index, Linker};
 /// Default entry point symbol name.
 pub const DEFAULT_ENTRY: &str = "_main";
 
-#[derive(Hash, Debug, Clone, PartialEq, Eq)]
-pub(super) enum Entry<C: CustomEntry> {
-    /// Header for the file format.
-    FileHeader,
-
-    /// Header for a single segment with the given name.
-    SegmentHeader(String),
-
-    /// Header for a single section with the given ID.
-    SectionHeader(MergedSectionId),
-
-    /// Data for a single section with the given ID.
-    SectionData(MergedSectionId),
-
-    /// Table of all symbols in the file
-    SymbolTable,
-
-    /// Table of all interned strings in the file
-    StringTable,
-
-    /// Custom section kind
-    Custom(C),
-}
-
-pub(crate) trait CustomEntry: Hash + Debug + Clone + PartialEq + Eq {
+pub(crate) trait SizedEntry: Hash + Debug + Clone + PartialEq + Eq {
     /// Gets the physical size of the entry within the file.
-    fn physical_size(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64;
+    fn physical_size(entry: &Self, builder: &LayoutBuilder<Self>) -> u64;
 
     /// Gets the virtual size of the entry when mapped into memory.
-    fn virtual_size(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64 {
+    fn virtual_size(entry: &Self, builder: &LayoutBuilder<Self>) -> u64 {
         Self::physical_size(entry, builder)
     }
 
     /// Gets the requirement alignment of the entry.
-    fn alignment(entry: &Entry<Self>, builder: &LayoutBuilder<Self>) -> u64 {
-        match entry {
-            Entry::FileHeader
-            | Entry::SegmentHeader(_)
-            | Entry::SectionHeader(_)
-            | Entry::StringTable
-            | Entry::SymbolTable
-            | Entry::Custom(_) => 1,
-            Entry::SectionData(section_id) => builder.db.merged_section(*section_id).alignment as u64,
-        }
-    }
+    fn alignment(entry: &Self, builder: &LayoutBuilder<Self>) -> u64;
 }
 
-pub(crate) trait EntryDisplay<C: CustomEntry> {
-    fn fmt(&self, builder: &Layout<C>, w: &mut dyn std::fmt::Write) -> std::fmt::Result;
-}
-
-impl<C: CustomEntry> EntryDisplay<C> for Entry<C>
+pub(crate) trait EntryDisplay
 where
-    C: EntryDisplay<C>,
+    Self: SizedEntry,
 {
-    fn fmt(&self, builder: &Layout<C>, w: &mut dyn std::fmt::Write) -> std::fmt::Result {
-        match self {
-            Entry::FileHeader => write!(w, "FileHeader"),
-            Entry::SegmentHeader(segment_name) => write!(w, "SegmentHeader, {segment_name}"),
-            Entry::SectionHeader(section_id) => {
-                write!(w, "SectionHeader, {}", builder.db.merged_section(*section_id).name)
-            }
-            Entry::SectionData(section_id) => {
-                write!(w, "SectionData, {}", builder.db.merged_section(*section_id).name)
-            }
-            Entry::SymbolTable => write!(w, "SymbolTable"),
-            Entry::StringTable => write!(w, "StringTable"),
-            Entry::Custom(custom) => EntryDisplay::fmt(custom, builder, w),
-        }
-    }
+    fn fmt(&self, builder: &Layout<Self>, w: &mut dyn std::fmt::Write) -> std::fmt::Result;
 }
 
-pub(crate) struct LayoutBuilder<'db, C: CustomEntry> {
+pub(crate) struct LayoutBuilder<'db, E: SizedEntry> {
     pub(crate) target: Target,
     pub(crate) db: &'db mut Database,
     pub(crate) index: &'db Index,
     pub(crate) config: &'db Config,
 
-    entries: IndexSet<Entry<C>>,
+    entries: IndexSet<E>,
 }
 
-impl<'db, C: CustomEntry> LayoutBuilder<'db, C> {
+impl<'db, E: SizedEntry> LayoutBuilder<'db, E> {
     /// Creates a new layout builder for the given target.
     pub(crate) fn new(linker: &'db mut Linker) -> Self {
         Self {
@@ -103,7 +51,7 @@ impl<'db, C: CustomEntry> LayoutBuilder<'db, C> {
     }
 
     /// Declares a new entry with the given kind.
-    pub(crate) fn declare_entry(&mut self, kind: Entry<C>) {
+    pub(crate) fn declare_entry(&mut self, kind: E) {
         self.entries.insert(kind);
     }
 
@@ -131,17 +79,17 @@ impl<'db, C: CustomEntry> LayoutBuilder<'db, C> {
     }
 
     /// Consumes the builder and creates a new [`Layout`].
-    pub(crate) fn into_layout(mut self) -> Layout<'db, C> {
+    pub(crate) fn into_layout(mut self) -> Layout<'db, E> {
         let mut entries = IndexMap::new();
 
         let mut physical_offset = 0;
         let mut virtual_offset = 0;
 
         for entry in std::mem::take(&mut self.entries) {
-            let alignment = C::alignment(&entry, &self);
+            let alignment = E::alignment(&entry, &self);
 
-            let physical_size = C::physical_size(&entry, &self);
-            let virtual_size = C::virtual_size(&entry, &self);
+            let physical_size = E::physical_size(&entry, &self);
+            let virtual_size = E::virtual_size(&entry, &self);
 
             let entry_poffset = align_to(physical_offset, alignment);
             let entry_voffset = align_to(virtual_offset, alignment);
@@ -186,56 +134,53 @@ pub(crate) struct EntryMetadata {
     pub(crate) alignment: u64,
 }
 
-pub(crate) struct Layout<'db, C: CustomEntry> {
+pub(crate) struct Layout<'db, E: SizedEntry> {
     pub(crate) target: Target,
     pub(crate) db: &'db mut Database,
     pub(crate) index: &'db Index,
     pub(crate) config: &'db Config,
 
-    entries: IndexMap<Entry<C>, EntryMetadata>,
+    entries: IndexMap<E, EntryMetadata>,
 }
 
-impl<C: CustomEntry> Layout<'_, C> {
+impl<E: SizedEntry> Layout<'_, E> {
     /// Gets an iterator over all entries in the layout.
-    pub(crate) fn entries(&self) -> impl Iterator<Item = (&Entry<C>, &EntryMetadata)> {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&E, &EntryMetadata)> {
         self.entries.iter()
     }
 
     /// Clones the entries from the layout and returns them.
-    pub(crate) fn clone_entries(&self) -> IndexMap<Entry<C>, EntryMetadata> {
+    pub(crate) fn clone_entries(&self) -> IndexMap<E, EntryMetadata> {
         self.entries.clone()
     }
 
     /// Gets the physical size of the given entry in the output file.
-    pub(crate) fn size_of_entry(&self, entry: &Entry<C>) -> u64 {
+    pub(crate) fn size_of_entry(&self, entry: &E) -> u64 {
         self.entries.get(entry).unwrap().physical_size
     }
 
     /// Gets the virtual size of the given entry when loaded into memory.
-    pub(crate) fn vmsize_of_entry(&self, entry: &Entry<C>) -> u64 {
+    pub(crate) fn vmsize_of_entry(&self, entry: &E) -> u64 {
         self.entries.get(entry).unwrap().virtual_size
     }
 
     /// Gets the physical offset of the given entry in the output file.
-    pub(crate) fn offset_of_entry(&self, entry: &Entry<C>) -> u64 {
+    pub(crate) fn offset_of_entry(&self, entry: &E) -> u64 {
         self.entries.get(entry).unwrap().physical_offset
     }
 
     /// Gets the physical offset of the given entry in the output file.
-    pub(crate) fn vaddr_of_entry(&self, entry: &Entry<C>) -> u64 {
+    pub(crate) fn vaddr_of_entry(&self, entry: &E) -> u64 {
         self.entries.get(entry).unwrap().virtual_offset
     }
 
     /// Gets the alignment of the given entry in the output file.
-    pub(crate) fn alignment_of_entry(&self, entry: &Entry<C>) -> u64 {
+    pub(crate) fn alignment_of_entry(&self, entry: &E) -> u64 {
         self.entries.get(entry).unwrap().alignment
     }
 }
 
-impl<C: CustomEntry> std::fmt::Display for Layout<'_, C>
-where
-    C: EntryDisplay<C>,
-{
+impl<E: EntryDisplay> std::fmt::Display for Layout<'_, E> {
     /// Displays the layout of the entries in the standard output.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (entry, metadata) in &self.entries {
@@ -255,7 +200,7 @@ where
     }
 }
 
-impl<C: CustomEntry> Layout<'_, C> {
+impl<E: SizedEntry> Layout<'_, E> {
     /// Gets the merging section of the section with the given ID, along with
     /// the index inside the merged section.
     pub(crate) fn merging_section_of(&self, id: SectionId) -> (&MergedSection, usize) {
@@ -264,53 +209,6 @@ impl<C: CustomEntry> Layout<'_, C> {
             .values()
             .find_map(|merged| merged.merged_from.get_index_of(&id).map(|idx| (merged, idx)))
             .unwrap()
-    }
-
-    /// Gets the file offset of the symbol with the given ID.
-    pub(crate) fn offset_of_symbol(&self, id: SymbolId) -> Option<u64> {
-        let symbol = self.db.symbol(id).unwrap();
-        let section_id = symbol.section?;
-
-        let (merged_section, nested_idx) = self.merging_section_of(section_id);
-        let mut parent_section_offset = self.offset_of_entry(&Entry::SectionData(merged_section.id));
-
-        for contained_section_id in merged_section.merged_from.iter().take(nested_idx + 1) {
-            let contained_section = self.db.section(*contained_section_id);
-            parent_section_offset += contained_section.data.len() as u64;
-        }
-
-        Some(parent_section_offset + symbol.address as u64)
-    }
-
-    /// Gets the virtual address of the symbol with the given ID when loaded
-    /// into memory.
-    pub(crate) fn vaddr_of_symbol(&self, id: SymbolId) -> u64 {
-        let symbol = self.db.symbol(id).unwrap();
-
-        let Some(section_id) = symbol.section else {
-            return symbol.address as u64;
-        };
-
-        let section_vaddr = self.vaddr_of_unmerged_section(section_id);
-        let symbol_addr = symbol.address as u64;
-
-        section_vaddr + symbol_addr
-    }
-
-    /// Gets the virtual address of the unmerged section with the given ID when
-    /// loaded into memory.
-    pub(crate) fn vaddr_of_unmerged_section(&self, id: SectionId) -> u64 {
-        let (merged_section, nested_idx) = self.merging_section_of(id);
-        let merged_vaddr = self.vaddr_of_entry(&Entry::SectionData(merged_section.id));
-
-        let mut section_vaddr = merged_vaddr;
-
-        for contained_section_id in merged_section.merged_from.iter().take(nested_idx + 1) {
-            let contained_section = self.db.section(*contained_section_id);
-            section_vaddr += contained_section.data.len() as u64;
-        }
-
-        section_vaddr
     }
 }
 

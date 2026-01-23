@@ -37,10 +37,9 @@ fn object_from<N: Hash>(file: InputFileId, name: &N, object: object::File) -> Ob
         let section_name = obj_section.name().expect("section name not UTF-8");
         let alignment = obj_section.align();
 
-        let placement = obj_section.file_range().map(|(offset, size)| Placement {
-            offset: usize::try_from(offset).unwrap(),
-            size: usize::try_from(size).unwrap(),
-        });
+        let placement = obj_section
+            .file_range()
+            .map(|(offset, size)| Placement { offset, size });
 
         let data = obj_section.data().unwrap().to_vec();
         let kind = section_kind_from(&obj_section);

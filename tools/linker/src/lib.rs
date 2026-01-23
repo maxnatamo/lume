@@ -13,7 +13,6 @@ pub(crate) mod index;
 pub mod layout;
 pub(crate) mod library;
 pub(crate) mod parse;
-pub(crate) mod reloc;
 pub(crate) mod write;
 
 pub use layout::*;

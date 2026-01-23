@@ -246,8 +246,8 @@ impl MergedSection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placement {
-    pub offset: usize,
-    pub size: usize,
+    pub offset: u64,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
