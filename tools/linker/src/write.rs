@@ -1,8 +1,6 @@
 use lume_errors::Result;
 
-use crate::{Format, LayoutBuilder, Linker};
-
-pub(crate) mod macho;
+use crate::{Format, LayoutBuilder, Linker, macho};
 
 pub(crate) fn write_to<W: Writer>(writer: &mut W, linker: &mut Linker) -> Result<()> {
     match linker.target.format {

@@ -17,6 +17,8 @@ pub(crate) mod write;
 
 pub use layout::*;
 
+pub(crate) mod macho;
+
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Name of the entry point symbol
