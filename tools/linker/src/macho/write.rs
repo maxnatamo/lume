@@ -1,5 +1,6 @@
 use indexmap::{IndexMap, IndexSet};
 use lume_errors::{Result, SimpleDiagnostic};
+use lume_span::Interned;
 use object::{NativeEndian as NE, macho};
 
 use crate::common::*;
@@ -9,16 +10,15 @@ use crate::{DEFAULT_ENTRY, Layout, LayoutBuilder, align_to};
 
 pub(crate) fn declare_layout(builder: &mut LayoutBuilder<Entry>) {
     builder.declare_entry(Entry::FileHeader);
-    builder.declare_entry(Entry::SegmentHeader(String::from(macho::SEG_PAGEZERO)));
+    builder.declare_entry(Entry::PageZero);
 
-    let segments: Vec<_> = builder.segments().map(ToOwned::to_owned).collect();
-    for segment in segments {
-        builder.declare_entry(Entry::SegmentHeader(segment.clone()));
+    let segments: Vec<_> = builder.segments().collect();
 
-        let sections: Vec<_> = builder.db.sections_in_segment(&segment).collect();
-        for section in sections {
-            builder.declare_entry(Entry::SectionHeader(section));
-        }
+    for segment_name in segments {
+        builder.declare_entry(Entry::SegmentHeader {
+            segment_name,
+            sections: builder.db.sections_in_segment(&segment_name).collect(),
+        });
     }
 
     builder.declare_entry(Entry::SymbolTableHeader);
@@ -41,60 +41,37 @@ pub(crate) fn declare_layout(builder: &mut LayoutBuilder<Entry>) {
 
 pub(crate) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<Entry>) -> Result<()> {
     let mut builder = Builder::new(layout);
-    let entries = builder.layout.clone_entries();
 
-    /*
-    let mut segment_vaddr = 0;
-
-    for (entry, _metadata) in &entries {
-        let Entry::SegmentHeader(segment_name) = entry else {
-            continue;
-        };
-
-        match segment_name.as_str() {
-            macho::SEG_PAGEZERO => {
-                builder.segment_places.insert(segment_name.clone(), Placement {
-                    offset: segment_vaddr,
-                    size: PAGE_ZERO_SIZE,
-                });
-
-                segment_vaddr += PAGE_ZERO_SIZE;
-            }
-            macho::SEG_TEXT => {
-                let first_section = builder.layout.db.merged_sections().next();
-                let first_section_id = first_section.expect("expected at least one section").id;
-
-                // Get the offset of the first section in the __TEXT segment, which
-                // would include all load commands, as well as the file header.
-                let total_metadata_size = builder.layout.offset_of_entry(&Entry::SectionData(first_section_id));
-
-                builder.segment_places.insert(segment_name.clone(), Placement {
-                    offset: segment_vaddr,
-                    size: total_metadata_size,
-                });
-
-                segment_vaddr += total_metadata_size;
-            }
-            _ => {
-                let segment_data_size = builder
-                    .layout
-                    .db
-                    .sections_in_segment(segment_name)
-                    .map(|id| builder.layout.size_of_entry(&Entry::SectionData(id)))
-                    .sum();
-
-                builder.segment_places.insert(segment_name.clone(), Placement {
-                    offset: segment_vaddr,
-                    size: segment_data_size,
-                });
-
-                segment_vaddr += segment_data_size;
+    builder.virtual_places = layout_virtual_places(&builder, |entry| match &entry {
+        Entry::PageZero => {
+            if builder.target.is_64bit() {
+                super::PAGE_ZERO_SIZE_64
+            } else {
+                super::PAGE_ZERO_SIZE_32
             }
         }
-    }
-     */
+        Entry::SegmentHeader { segment_name, sections } => {
+            // The __TEXT segment needs to hold the entire MachO file metadata within it to
+            // be mapped correctly.
+            //
+            // Since sections are ordered by address, we get the offset of the first byte in
+            // the first section, which gets us the size of all MachO file metadata within
+            // the file.
+            if segment_name.as_str() == macho::SEG_TEXT {
+                let first_section_id = builder.layout.db.output_sections().next().unwrap().id;
 
-    for (entry, metadata) in entries {
+                builder.layout.offset_of_entry(&Entry::SectionData(first_section_id))
+            } else {
+                sections
+                    .iter()
+                    .map(|&section_id| builder.layout.size_of_entry(&Entry::SectionData(section_id)))
+                    .sum::<u64>()
+            }
+        }
+        _ => 0,
+    });
+
+    for (entry, metadata) in builder.layout.clone_entries() {
         let alignment = builder.layout.alignment_of_entry(&entry);
         writer.align_to(usize::try_from(alignment).unwrap())?;
 
@@ -105,8 +82,8 @@ pub(crate) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<Entry>) -> R
 
         match &entry {
             Entry::FileHeader => builder.write_file_header(writer)?,
-            Entry::SegmentHeader(segment) => builder.write_segment_header(segment, writer)?,
-            Entry::SectionHeader(section_id) => builder.write_section_header(*section_id, writer)?,
+            Entry::PageZero => builder.write_page_zero(writer)?,
+            Entry::SegmentHeader { segment_name, .. } => builder.write_segment_header(&entry, *segment_name, writer)?,
             Entry::SymbolTableHeader => builder.write_symtab_header(writer)?,
             Entry::DylibHeader(lib_id) => builder.write_dylib_header(*lib_id, writer)?,
             Entry::SectionData(section_id) => builder.write_section_data(*section_id, writer)?,
@@ -127,9 +104,35 @@ pub(crate) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<Entry>) -> R
     Ok(())
 }
 
+/// Calculates the virtual placement of all entries within the builder.
+///
+/// For each entry, the given closure is invoked to return the virtual size of
+/// the entry. The virtual address of all subsequent entries is set to the sum
+/// of all previous entry sizes.
+fn layout_virtual_places<F: Fn(&Entry) -> u64>(builder: &Builder, f: F) -> IndexMap<Entry, Placement> {
+    let mut vmaddr = 0;
+    let mut entries = IndexMap::with_capacity(builder.layout.entries.len());
+
+    for (entry, _metadata) in builder.layout.clone_entries() {
+        let vmsize = f(&entry);
+
+        entries.insert(entry, Placement {
+            offset: vmaddr,
+            size: vmsize,
+        });
+
+        vmaddr += vmsize;
+    }
+
+    entries
+}
+
 struct Builder<'db> {
     target: Target,
     layout: Layout<'db, Entry>,
+
+    /// Defines the virtual placements for each entry within the layout.
+    virtual_places: IndexMap<Entry, Placement>,
 
     string_table: IndexMap<String, usize>,
 }
@@ -139,6 +142,7 @@ impl<'db> Builder<'db> {
         Builder {
             target: layout.target,
             layout,
+            virtual_places: IndexMap::new(),
             string_table: IndexMap::new(),
         }
     }
@@ -177,46 +181,65 @@ impl<'db> Builder<'db> {
         }
     }
 
-    /// Gets the amount of load commands in the Mach-O file.
-    pub fn load_command_len(&self) -> u32 {
-        fn is_lc_entry(entry: &Entry) -> bool {
-            matches!(
-                entry,
-                Entry::SegmentHeader(_) | Entry::SymbolTableHeader | Entry::DylibHeader(_) | Entry::Entrypoint
-            )
+    /// Gets the size of a segment load command, in bytes.
+    #[inline]
+    fn segment_hdr_size(&self) -> u64 {
+        if self.target.is_64bit() {
+            size_of::<macho::SegmentCommand64<NE>>() as u64
+        } else {
+            size_of::<macho::SegmentCommand32<NE>>() as u64
         }
+    }
 
+    /// Gets the size of a section header, in bytes.
+    #[inline]
+    fn section_hdr_size(&self) -> u64 {
+        if self.target.is_64bit() {
+            size_of::<macho::Section64<NE>>() as u64
+        } else {
+            size_of::<macho::Section32<NE>>() as u64
+        }
+    }
+
+    /// Gets the amount of load commands in the Mach-O file.
+    pub fn lc_count(&self) -> u32 {
         let count = self
             .layout
             .entries()
-            .filter_map(|(entry, _meta)| is_lc_entry(entry).then_some(entry))
+            .filter_map(|(entry, _meta)| entry.is_load_command().then_some(entry))
             .count();
 
         u32::try_from(count).unwrap()
     }
 
     /// Gets the size of load commands in the Mach-O file, in bytes.
-    pub fn load_command_size(&self) -> u32 {
-        /// Note: should also include the size of child headers as well, such as
-        /// section headers which are children of segment headers.
-        fn is_lc_entry(entry: &Entry) -> bool {
-            matches!(
-                entry,
-                Entry::SegmentHeader(_)
-                    | Entry::SectionHeader(_)
-                    | Entry::SymbolTableHeader
-                    | Entry::DylibHeader(_)
-                    | Entry::Entrypoint
-            )
-        }
-
+    pub fn lc_size(&self) -> u32 {
         let size = self
             .layout
             .entries()
-            .filter_map(|(entry, meta)| is_lc_entry(entry).then_some(meta.physical_size))
+            .filter_map(|(entry, meta)| {
+                // Note: should also include the size of child headers as well, such as
+                //       section headers which are children of segment headers.
+
+                if entry.is_load_command() {
+                    Some(meta.physical_size)
+                } else {
+                    None
+                }
+            })
             .sum::<u64>();
 
         u32::try_from(size).unwrap()
+    }
+
+    /// Gets the virtual size of the given entry when loaded into memory.
+    pub(crate) fn vmsize_of_entry(&self, entry: &Entry) -> u64 {
+        self.virtual_places.get(entry).unwrap().size
+    }
+
+    /// Gets the virtual offset of the given entry when loaded into memory.
+    pub(crate) fn vmaddr_of_entry(&self, entry: &Entry) -> u64 {
+        self.virtual_places.get(entry).unwrap().offset
     }
 
     pub fn write_file_header<W: Writer>(&self, writer: &mut W) -> Result<()> {
@@ -226,8 +249,8 @@ impl<'db> Builder<'db> {
 
         writer.write_u32(macho::MH_EXECUTE)?;
 
-        writer.write_u32(self.load_command_len())?;
-        writer.write_u32(self.load_command_size())?;
+        writer.write_u32(self.lc_count())?;
+        writer.write_u32(self.lc_size())?;
 
         let flags = macho::MH_DYLDLINK | macho::MH_PIE;
         writer.write_u32(flags)?;
@@ -239,41 +262,66 @@ impl<'db> Builder<'db> {
         Ok(())
     }
 
-    pub fn write_segment_header<W: Writer>(&self, segment_name: &str, writer: &mut W) -> Result<()> {
-        let header_entry = Entry::SegmentHeader(segment_name.to_owned());
-        let sections = self.layout.db.sections_in_segment(segment_name).collect::<Vec<_>>();
+    pub fn write_page_zero<W: Writer>(&self, writer: &mut W) -> Result<()> {
+        let lc_size = self.layout.size_of_entry(&Entry::PageZero);
+        let vmsize = self.vmsize_of_entry(&Entry::PageZero);
 
-        let first_section_offset = sections
-            .first()
-            .map_or(0, |&section| self.layout.offset_of_entry(&Entry::SectionData(section)));
+        writer.write_u32(macho::LC_SEGMENT_64)?;
+        writer.write_u32(u32::try_from(lc_size).unwrap())?;
 
-        let section_header_size = sections
-            .iter()
-            .map(|&section| self.layout.size_of_entry(&Entry::SectionHeader(section)))
-            .sum::<u64>();
+        let mut segment_name_bytes = macho::SEG_PAGEZERO.as_bytes().to_vec();
+        segment_name_bytes.resize(16, 0);
+        writer.write(&segment_name_bytes)?;
+
+        writer.write_u64(0x0000_0000)?; // vmaddr
+        writer.write_u64(vmsize)?; // vmsize
+
+        writer.write_u64(0)?; // fileoff
+        writer.write_u64(0)?; // filesize
+
+        writer.write_u32(0)?; // maxprot
+        writer.write_u32(0)?; // initprot
+
+        writer.write_u32(0)?; // nsects
+        writer.write_u32(0x00)?; // flags
+
+        Ok(())
+    }
+
+    pub fn write_segment_header<W: Writer>(
+        &self,
+        entry: &Entry,
+        segment_name: Interned<String>,
+        writer: &mut W,
+    ) -> Result<()> {
+        let segment_str: &str = segment_name.as_ref();
+        let sections = self.layout.db.sections_in_segment(segment_str).collect::<Vec<_>>();
 
         // Add the size of the segment header itself along with all section
         // headers within it.
-        let lc_size = self.layout.size_of_entry(&header_entry) + section_header_size;
+        let section_header_size = sections.len() as u64 * self.section_hdr_size();
+        let lc_size = self.segment_hdr_size() + section_header_size;
 
-        let vaddr = self.layout.vaddr_of_segment(segment_name);
-        let mut vsize = self.layout.vsize_of_segment(segment_name);
+        let seg_vmaddr = self.vmaddr_of_entry(entry);
+        let seg_vmsize = self.vmsize_of_entry(entry);
 
-        let mut fileoff = first_section_offset;
-        let mut filesize = self.layout.size_of_segment(segment_name);
+        let (fileoff, filesize) = if segment_str == macho::SEG_TEXT {
+            let first_section_id = self.layout.db.output_sections().next().unwrap().id;
+            let metadata_size = self.layout.offset_of_entry(&Entry::SectionData(first_section_id));
 
-        if segment_name == macho::SEG_TEXT {
-            let first_section = self.layout.db.output_sections().next();
-            let first_section_id = first_section.expect("expected at least one section").id;
+            (0, metadata_size)
+        } else {
+            let fileoff = sections
+                .first()
+                .map_or(0, |&section| self.layout.offset_of_entry(&Entry::SectionData(section)));
 
-            // Get the offset of the first section in the __TEXT segment, which
-            // would include all load commands, as well as the file header.
-            let total_metadata_size = self.layout.offset_of_entry(&Entry::SectionData(first_section_id));
+            let filesize = sections
+                .iter()
+                .map(|&section_id| self.layout.size_of_entry(&Entry::SectionData(section_id)))
+                .sum::<u64>();
 
-            fileoff = 0;
-            vsize = total_metadata_size;
-            filesize = total_metadata_size;
-        }
+            (fileoff, filesize)
+        };
 
         writer.write_u32(macho::LC_SEGMENT_64)?;
         writer.write_u32(u32::try_from(lc_size).unwrap())?;
@@ -282,14 +330,13 @@ impl<'db> Builder<'db> {
         segment_name_bytes.resize(16, 0);
         writer.write(&segment_name_bytes)?;
 
-        writer.write_u64(vaddr)?;
-        writer.write_u64(vsize)?;
+        writer.write_u64(seg_vmaddr)?;
+        writer.write_u64(seg_vmsize)?;
 
         writer.write_u64(fileoff)?;
         writer.write_u64(filesize)?;
 
-        let section_prot = match segment_name {
-            macho::SEG_PAGEZERO => 0x0000_0000,
+        let section_prot = match segment_str {
             macho::SEG_TEXT => macho::VM_PROT_READ | macho::VM_PROT_EXECUTE,
             macho::SEG_DATA => macho::VM_PROT_READ | macho::VM_PROT_WRITE,
             _ => macho::VM_PROT_READ,
@@ -301,49 +348,48 @@ impl<'db> Builder<'db> {
         writer.write_u32(u32::try_from(sections.len()).unwrap())?; // nsects
         writer.write_u32(0x00)?; // flags
 
-        Ok(())
-    }
+        let mut section_offset = 0;
 
-    pub fn write_section_header<W: Writer>(&self, section_id: OutputSectionId, writer: &mut W) -> Result<()> {
-        let data_entry = Entry::SectionData(section_id);
+        for section_id in sections {
+            let data_entry = Entry::SectionData(section_id);
+            let section = self.layout.db.output_section(section_id);
 
-        let section = self.layout.db.output_section(section_id);
-        let segment_name = section.name.segment.as_deref().unwrap_or("");
+            let mut section_name_bytes = section.name.section.as_bytes().to_vec();
+            section_name_bytes.resize(16, 0);
+            writer.write(&section_name_bytes)?;
 
-        let mut section_name_bytes = section.name.section.as_bytes().to_vec();
-        section_name_bytes.resize(16, 0);
-        writer.write(&section_name_bytes)?;
+            writer.write(&segment_name_bytes)?;
 
-        let mut segment_name_bytes = segment_name.as_bytes().to_vec();
-        segment_name_bytes.resize(16, 0);
-        writer.write(&segment_name_bytes)?;
+            let sec_vmaddr = seg_vmaddr + section_offset;
+            let sec_vmsize = self.layout.size_of_entry(&data_entry);
+            let offset = self.layout.offset_of_entry(&data_entry);
 
-        let vaddr = self.layout.vaddr_of_entry(&data_entry);
-        let vsize = self.layout.size_of_entry(&data_entry);
-        let offset = self.layout.offset_of_entry(&data_entry);
+            writer.write_u64(sec_vmaddr)?; // addr
+            writer.write_u64(sec_vmsize)?; // size
 
-        writer.write_u64(vaddr)?; // addr
-        writer.write_u64(vsize)?; // size
-        writer.write_u32(u32::try_from(offset).unwrap())?; // offset
-        writer.write_u32(section.alignment.ilog2())?; // align
+            writer.write_u32(u32::try_from(offset).unwrap())?; // offset
+            writer.write_u32(section.alignment.ilog2())?; // align
 
-        writer.write_u32(0)?; // reloff
-        writer.write_u32(0)?; // nreloc
+            writer.write_u32(0)?; // reloff
+            writer.write_u32(0)?; // nreloc
 
-        let flags = match section.kind {
-            SectionKind::Unknown | SectionKind::Data => macho::S_REGULAR,
-            SectionKind::Text => macho::S_ATTR_SOME_INSTRUCTIONS | macho::S_ATTR_PURE_INSTRUCTIONS,
-            SectionKind::ZeroFilled => macho::S_ZEROFILL,
-            SectionKind::CStrings => macho::S_CSTRING_LITERALS,
-            SectionKind::LumeMetadata => macho::S_ATTR_NO_DEAD_STRIP,
-            SectionKind::LumeAliases => macho::S_LITERAL_POINTERS,
-        };
+            let flags = match section.kind {
+                SectionKind::Unknown | SectionKind::Data => macho::S_REGULAR,
+                SectionKind::Text => macho::S_ATTR_SOME_INSTRUCTIONS | macho::S_ATTR_PURE_INSTRUCTIONS,
+                SectionKind::ZeroFilled => macho::S_ZEROFILL,
+                SectionKind::CStrings => macho::S_CSTRING_LITERALS,
+                SectionKind::LumeMetadata => macho::S_ATTR_NO_DEAD_STRIP,
+                SectionKind::LumeAliases => macho::S_LITERAL_POINTERS,
+            };
 
-        writer.write_u32(flags)?;
+            writer.write_u32(flags)?;
 
-        writer.write_u32(0)?; // reserved1
-        writer.write_u32(0)?; // reserved2
-        writer.write_u32(0)?; // reserved3
+            writer.write_u32(0)?; // reserved1
+            writer.write_u32(0)?; // reserved2
+            writer.write_u32(0)?; // reserved3
+
+            section_offset += sec_vmsize;
+        }
 
         Ok(())
     }

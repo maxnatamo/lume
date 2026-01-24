@@ -1,3 +1,4 @@
+use lume_span::Interned;
 use object::{NativeEndian as NE, macho};
 
 use crate::common::*;
@@ -9,18 +10,24 @@ pub(crate) mod write;
 pub(crate) use write::{declare_layout, emit_layout};
 
 /// Default page zero size for the linker (only used on macOS).
-pub const PAGE_ZERO_SIZE: u64 = 0x0000_0001_0000_0000;
+pub const PAGE_ZERO_SIZE_64: u64 = 0x0000_0001_0000_0000;
+
+/// Default page zero size for the linker (only used on macOS).
+pub const PAGE_ZERO_SIZE_32: u64 = 0x0000_0000_0000_1000;
 
 #[derive(Hash, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Entry {
     /// Header for the file format.
     FileHeader,
 
-    /// Header for a single segment with the given name.
-    SegmentHeader(String),
+    /// Header for the page zero segment (__PAGEZERO).
+    PageZero,
 
-    /// Header for a single section with the given ID.
-    SectionHeader(OutputSectionId),
+    /// Header for a single segment with the given name.
+    SegmentHeader {
+        segment_name: Interned<String>,
+        sections: Vec<OutputSectionId>,
+    },
 
     /// Data for a single section with the given ID.
     SectionData(OutputSectionId),
@@ -41,6 +48,21 @@ pub(crate) enum Entry {
     Entrypoint,
 }
 
+impl Entry {
+    /// Determines if the entry is a load command.
+    #[inline]
+    pub fn is_load_command(&self) -> bool {
+        matches!(
+            self,
+            Entry::PageZero
+                | Entry::SegmentHeader { .. }
+                | Entry::SymbolTableHeader
+                | Entry::DylibHeader(_)
+                | Entry::Entrypoint
+        )
+    }
+}
+
 impl SizedEntry for Entry {
     fn physical_size(entry: &Self, builder: &LayoutBuilder<Self>) -> u64 {
         match entry {
@@ -51,19 +73,27 @@ impl SizedEntry for Entry {
                     size_of::<macho::MachHeader32<NE>>() as u64
                 }
             }
-            Entry::SegmentHeader(_) => {
+            Entry::PageZero => {
                 if builder.target.is_64bit() {
                     size_of::<macho::SegmentCommand64<NE>>() as u64
                 } else {
                     size_of::<macho::SegmentCommand32<NE>>() as u64
                 }
             }
-            Entry::SectionHeader(_) => {
-                if builder.target.is_64bit() {
+            Entry::SegmentHeader { sections, .. } => {
+                let segment_size = if builder.target.is_64bit() {
+                    size_of::<macho::SegmentCommand64<NE>>() as u64
+                } else {
+                    size_of::<macho::SegmentCommand32<NE>>() as u64
+                };
+
+                let section_size = if builder.target.is_64bit() {
                     size_of::<macho::Section64<NE>>() as u64
                 } else {
                     size_of::<macho::Section32<NE>>() as u64
-                }
+                };
+
+                segment_size + section_size * sections.len() as u64
             }
             Entry::SectionData(section_id) => builder.size_of_section(*section_id),
             Entry::SymbolTable => {
@@ -99,30 +129,11 @@ impl SizedEntry for Entry {
         }
     }
 
-    fn virtual_size(entry: &Self, builder: &LayoutBuilder<Self>) -> u64 {
-        match entry {
-            Entry::FileHeader
-            | Entry::SectionHeader(_)
-            | Entry::DylibHeader(_)
-            | Entry::SymbolTableHeader
-            | Entry::Entrypoint => 0,
-            Entry::SegmentHeader(segment_name) => {
-                if builder.target.has_page_zero() && segment_name == macho::SEG_PAGEZERO {
-                    PAGE_ZERO_SIZE
-                } else {
-                    0
-                }
-            }
-            Entry::SectionData(section_id) => builder.size_of_section(*section_id),
-            Entry::SymbolTable | Entry::StringTable => Self::physical_size(entry, builder),
-        }
-    }
-
     fn alignment(entry: &Self, builder: &LayoutBuilder<Self>) -> u64 {
         match entry {
             Entry::FileHeader
-            | Entry::SegmentHeader(_)
-            | Entry::SectionHeader(_)
+            | Entry::PageZero
+            | Entry::SegmentHeader { .. }
             | Entry::StringTable
             | Entry::SymbolTable
             | Entry::DylibHeader(_)
@@ -137,10 +148,8 @@ impl EntryDisplay for Entry {
     fn fmt(&self, builder: &Layout<Entry>, w: &mut dyn std::fmt::Write) -> std::fmt::Result {
         match self {
             Self::FileHeader => write!(w, "FileHeader"),
-            Self::SegmentHeader(segment_name) => write!(w, "SegmentHeader, {segment_name}"),
-            Self::SectionHeader(section_id) => {
-                write!(w, "SectionHeader, {}", builder.db.output_section(*section_id).name)
-            }
+            Self::PageZero => write!(w, "PageZero"),
+            Self::SegmentHeader { segment_name, .. } => write!(w, "SegmentHeader, {segment_name}"),
             Self::SectionData(section_id) => {
                 write!(w, "SectionData, {}", builder.db.output_section(*section_id).name)
             }
@@ -156,40 +165,6 @@ impl EntryDisplay for Entry {
 }
 
 impl Layout<'_, Entry> {
-    /// Gets the virtual address of the segment with the given name, when loaded
-    /// into memory.
-    pub(crate) fn vaddr_of_segment(&self, name: &str) -> u64 {
-        let Some(first_section_id) = self.db.sections_in_segment(name).next() else {
-            return 0;
-        };
-
-        self.vaddr_of_entry(&Entry::SectionData(first_section_id))
-    }
-
-    /// Gets the physical size of the section with the given ID, in bytes.
-    pub(crate) fn size_of_segment(&self, name: &str) -> u64 {
-        if self.target.has_page_zero() && name == macho::SEG_PAGEZERO {
-            return 0;
-        }
-
-        self.db
-            .sections_in_segment(name)
-            .map(|id| self.size_of_entry(&Entry::SectionData(id)))
-            .sum()
-    }
-
-    /// Gets the virtual size of the section with the given ID, in bytes.
-    pub(crate) fn vsize_of_segment(&self, name: &str) -> u64 {
-        if self.target.has_page_zero() && name == macho::SEG_PAGEZERO {
-            return PAGE_ZERO_SIZE;
-        }
-
-        self.db
-            .sections_in_segment(name)
-            .map(|id| self.vmsize_of_entry(&Entry::SectionData(id)))
-            .sum()
-    }
-
     /// Gets the file offset of the symbol with the given ID.
     pub(crate) fn offset_of_symbol(&self, id: SymbolId) -> Option<u64> {
         let symbol = self.db.symbol(id).unwrap();
@@ -225,7 +200,7 @@ impl Layout<'_, Entry> {
     /// loaded into memory.
     pub(crate) fn vaddr_of_unmerged_section(&self, id: InputSectionId) -> u64 {
         let (merged_section, nested_idx) = self.input_section_of(id);
-        let merged_vaddr = self.vaddr_of_entry(&Entry::SectionData(merged_section.id));
+        let merged_vaddr = self.offset_of_entry(&Entry::SectionData(merged_section.id));
 
         let mut section_vaddr = merged_vaddr;
 

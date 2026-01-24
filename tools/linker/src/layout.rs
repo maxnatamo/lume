@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 use indexmap::{IndexMap, IndexSet};
+use lume_span::{Internable, Interned};
 
 use crate::common::*;
 use crate::{Config, Database, Index, Linker};
@@ -13,11 +14,6 @@ pub(crate) trait SizedEntry: Hash + Debug + Clone + PartialEq + Eq {
     /// Gets the physical size of the entry within the file.
     fn physical_size(entry: &Self, builder: &LayoutBuilder<Self>) -> u64;
 
-    /// Gets the virtual size of the entry when mapped into memory.
-    fn virtual_size(entry: &Self, builder: &LayoutBuilder<Self>) -> u64 {
-        Self::physical_size(entry, builder)
-    }
-
     /// Gets the requirement alignment of the entry.
     fn alignment(entry: &Self, builder: &LayoutBuilder<Self>) -> u64;
 }
@@ -26,6 +22,7 @@ pub(crate) trait EntryDisplay
 where
     Self: SizedEntry,
 {
+    /// Displays the name of the entry in a human-readable way.
     fn fmt(&self, builder: &Layout<Self>, w: &mut dyn std::fmt::Write) -> std::fmt::Result;
 }
 
@@ -56,8 +53,8 @@ impl<'db, E: SizedEntry> LayoutBuilder<'db, E> {
     }
 
     /// Gets an iterator over all segment names in the layout.
-    pub(crate) fn segments(&self) -> impl Iterator<Item = &str> {
-        self.db.output_segments.keys().map(|s| s.as_str())
+    pub(crate) fn segments(&self) -> impl Iterator<Item = Interned<String>> {
+        self.db.output_segments.keys().map(|s| s.intern())
     }
 
     /// Gets a set of all required library IDs.
@@ -82,28 +79,21 @@ impl<'db, E: SizedEntry> LayoutBuilder<'db, E> {
     pub(crate) fn into_layout(mut self) -> Layout<'db, E> {
         let mut entries = IndexMap::new();
 
-        let mut physical_offset = 0;
-        let mut virtual_offset = 0;
+        let mut current_offset = 0;
 
         for entry in std::mem::take(&mut self.entries) {
             let alignment = E::alignment(&entry, &self);
-
             let physical_size = E::physical_size(&entry, &self);
-            let virtual_size = E::virtual_size(&entry, &self);
 
-            let entry_poffset = align_to(physical_offset, alignment);
-            let entry_voffset = align_to(virtual_offset, alignment);
+            let physical_offset = align_to(current_offset, alignment);
 
             entries.insert(entry, EntryMetadata {
                 physical_size,
-                virtual_size,
-                physical_offset: entry_poffset,
-                virtual_offset: entry_voffset,
+                physical_offset,
                 alignment,
             });
 
-            physical_offset = entry_poffset + physical_size;
-            virtual_offset = entry_voffset + virtual_size;
+            current_offset = physical_offset + physical_size;
         }
 
         Layout {
@@ -121,14 +111,8 @@ pub(crate) struct EntryMetadata {
     /// Defines the physical size of the entry in the output file.
     pub(crate) physical_size: u64,
 
-    /// Defines the virtual size of the entry when loaded into memory.
-    pub(crate) virtual_size: u64,
-
     /// Defines the offset of the entry in the output file.
     pub(crate) physical_offset: u64,
-
-    /// Defines the virtual address of the entry when loaded into memory.
-    pub(crate) virtual_offset: u64,
 
     /// Defines the alignment of the entry.
     pub(crate) alignment: u64,
@@ -140,7 +124,7 @@ pub(crate) struct Layout<'db, E: SizedEntry> {
     pub(crate) index: &'db Index,
     pub(crate) config: &'db Config,
 
-    entries: IndexMap<E, EntryMetadata>,
+    pub(crate) entries: IndexMap<E, EntryMetadata>,
 }
 
 impl<E: SizedEntry> Layout<'_, E> {
@@ -159,19 +143,9 @@ impl<E: SizedEntry> Layout<'_, E> {
         self.entries.get(entry).unwrap().physical_size
     }
 
-    /// Gets the virtual size of the given entry when loaded into memory.
-    pub(crate) fn vmsize_of_entry(&self, entry: &E) -> u64 {
-        self.entries.get(entry).unwrap().virtual_size
-    }
-
     /// Gets the physical offset of the given entry in the output file.
     pub(crate) fn offset_of_entry(&self, entry: &E) -> u64 {
         self.entries.get(entry).unwrap().physical_offset
-    }
-
-    /// Gets the physical offset of the given entry in the output file.
-    pub(crate) fn vaddr_of_entry(&self, entry: &E) -> u64 {
-        self.entries.get(entry).unwrap().virtual_offset
     }
 
     /// Gets the alignment of the given entry in the output file.
@@ -184,15 +158,13 @@ impl<E: EntryDisplay> std::fmt::Display for Layout<'_, E> {
     /// Displays the layout of the entries in the standard output.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (entry, metadata) in &self.entries {
-            write!(f, "Entry ")?;
-            EntryDisplay::fmt(entry, self, f)?;
-            writeln!(f)?;
+            write!(
+                f,
+                "[0x{:08x} + 0x{:04x}]   ",
+                metadata.physical_offset, metadata.physical_size
+            )?;
 
-            writeln!(f, "   Alignment:     0x{:02x}", metadata.alignment)?;
-            writeln!(f, "   Phys. offset:  0x{:016x}", metadata.physical_offset)?;
-            writeln!(f, "   Phys. size:    0x{:016x}", metadata.physical_size)?;
-            writeln!(f, "   Virt. address: 0x{:016x}", metadata.virtual_offset)?;
-            writeln!(f, "   Virt. size:    0x{:016x}", metadata.virtual_size)?;
+            EntryDisplay::fmt(entry, self, f)?;
             writeln!(f)?;
         }
 
