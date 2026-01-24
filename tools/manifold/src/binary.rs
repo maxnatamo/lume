@@ -16,7 +16,9 @@ pub(crate) struct TestCase {
     file_content: String,
 }
 
-pub(crate) fn run_test(path: PathBuf, dcx: DiagCtx) -> Result<TestResult> {
+pub(crate) fn run_test(path: PathBuf, config: &crate::Config, dcx: DiagCtx) -> Result<TestResult> {
+    let print_output = config.print_output;
+
     let mut stdout_path = path.clone();
     stdout_path.set_extension("stdout");
 
@@ -60,6 +62,15 @@ pub(crate) fn run_test(path: PathBuf, dcx: DiagCtx) -> Result<TestResult> {
 
             writeln!(&mut f, "Expected return code:   {}", expected_return_code.yellow()).unwrap();
             writeln!(&mut f, "Actual return code:     {}", return_code.red()).unwrap();
+
+            if print_output == crate::PrintOutput::OnFailure {
+                let stdout = str::from_utf8(&output.stdout).unwrap_or("<failed to decode output>");
+                let stderr = str::from_utf8(&output.stderr).unwrap_or("<failed to decode output>");
+
+                writeln!(&mut f, "Standard output:        {stdout}").unwrap();
+                writeln!(&mut f, "Standard error:         {stderr}").unwrap();
+            }
+
             writeln!(&mut f).unwrap();
 
             String::from_utf8_lossy(&f).to_string()

@@ -4,7 +4,7 @@ use lume_span::Interned;
 use object::{NativeEndian as NE, macho};
 
 use crate::common::*;
-use crate::macho::Entry;
+use crate::macho::{DYLINKER_NAME, Entry};
 use crate::write::Writer;
 use crate::{DEFAULT_ENTRY, Layout, LayoutBuilder, align_to};
 
@@ -21,7 +21,10 @@ pub(crate) fn declare_layout(builder: &mut LayoutBuilder<Entry>) {
         });
     }
 
+    builder.declare_entry(Entry::LinkEdit);
     builder.declare_entry(Entry::SymbolTableHeader);
+    builder.declare_entry(Entry::DynamicSymbolTableHeader);
+    builder.declare_entry(Entry::LoadDylinker);
 
     for library_id in builder.required_library_ids() {
         builder.declare_entry(Entry::DylibHeader(library_id));
@@ -50,22 +53,36 @@ pub(crate) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<Entry>) -> R
                 super::PAGE_ZERO_SIZE_32
             }
         }
-        Entry::SegmentHeader { segment_name, sections } => {
-            // The __TEXT segment needs to hold the entire MachO file metadata within it to
-            // be mapped correctly.
-            //
-            // Since sections are ordered by address, we get the offset of the first byte in
-            // the first section, which gets us the size of all MachO file metadata within
-            // the file.
-            if segment_name.as_str() == macho::SEG_TEXT {
-                let first_section_id = builder.layout.db.output_sections().next().unwrap().id;
 
-                builder.layout.offset_of_entry(&Entry::SectionData(first_section_id))
-            } else {
-                sections
+        // The `__LINKEDIT` segment currently contains the string table and the symbol table.
+        Entry::LinkEdit => {
+            let vbase = builder.layout.offset_of_entry(&Entry::StringTable);
+
+            let symtab_offset = builder.layout.offset_of_entry(&Entry::SymbolTable);
+            let symtab_size = builder.layout.size_of_entry(&Entry::SymbolTable);
+            let vend = symtab_offset + symtab_size;
+
+            vend - vbase
+        }
+
+        Entry::SegmentHeader { segment_name, sections } => {
+            match segment_name.as_str() {
+                // The __TEXT segment needs to hold the entire MachO file metadata within it to
+                // be mapped correctly.
+                //
+                // Since sections are ordered by address, we get the offset of the first byte in
+                // the first section, which gets us the size of all MachO file metadata within
+                // the file.
+                macho::SEG_TEXT => {
+                    let first_section_id = builder.layout.db.output_sections().next().unwrap().id;
+
+                    builder.layout.offset_of_entry(&Entry::SectionData(first_section_id))
+                }
+
+                _ => sections
                     .iter()
                     .map(|&section_id| builder.layout.size_of_entry(&Entry::SectionData(section_id)))
-                    .sum::<u64>()
+                    .sum::<u64>(),
             }
         }
         _ => 0,
@@ -84,12 +101,15 @@ pub(crate) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<Entry>) -> R
             Entry::FileHeader => builder.write_file_header(writer)?,
             Entry::PageZero => builder.write_page_zero(writer)?,
             Entry::SegmentHeader { segment_name, .. } => builder.write_segment_header(&entry, *segment_name, writer)?,
+            Entry::LinkEdit => builder.write_linkedit(writer)?,
             Entry::SymbolTableHeader => builder.write_symtab_header(writer)?,
+            Entry::DynamicSymbolTableHeader => builder.write_dysymtab_header(writer)?,
             Entry::DylibHeader(lib_id) => builder.write_dylib_header(*lib_id, writer)?,
             Entry::SectionData(section_id) => builder.write_section_data(*section_id, writer)?,
             Entry::StringTable => builder.write_string_table(writer)?,
             Entry::SymbolTable => builder.write_symbol_table(writer)?,
             Entry::Entrypoint => builder.write_entrypoint(writer)?,
+            Entry::LoadDylinker => builder.write_dylinker(writer)?,
         }
 
         let written_bytes = writer.len() - current_length;
@@ -125,6 +145,32 @@ fn layout_virtual_places<F: Fn(&Entry) -> u64>(builder: &Builder, f: F) -> Index
     }
 
     entries
+}
+
+/// Sorts the given iterator of symbols, depending on their linkage.
+///
+/// The symbol table in Mach-O expects the symbols to appear in a certain order:
+/// - local debug symbols,
+/// - private symbols,
+/// - external symbols,
+/// - undefined symbols
+fn sort_symbols<I>(builder: &Builder, symbols: I) -> Vec<SymbolId>
+where
+    I: Iterator<Item = SymbolId>,
+{
+    let mut sorted_symbols: Vec<_> = symbols.collect();
+
+    sorted_symbols.sort_by_key(|&sym_id| {
+        let linkage = builder.layout.db.symbol(sym_id).unwrap().linkage;
+
+        match linkage {
+            Linkage::Local => 0,
+            Linkage::Global => 1,
+            Linkage::External => 2,
+        }
+    });
+
+    sorted_symbols
 }
 
 struct Builder<'db> {
@@ -252,7 +298,7 @@ impl<'db> Builder<'db> {
         writer.write_u32(self.lc_count())?;
         writer.write_u32(self.lc_size())?;
 
-        let flags = macho::MH_DYLDLINK | macho::MH_PIE;
+        let flags = macho::MH_DYLDLINK | macho::MH_PIE | macho::MH_NOUNDEFS;
         writer.write_u32(flags)?;
 
         if self.target.is_64bit() {
@@ -394,6 +440,35 @@ impl<'db> Builder<'db> {
         Ok(())
     }
 
+    pub fn write_linkedit<W: Writer>(&self, writer: &mut W) -> Result<()> {
+        let lc_size = self.layout.size_of_entry(&Entry::LinkEdit);
+
+        let vmaddr = self.vmaddr_of_entry(&Entry::LinkEdit);
+        let vmsize = self.vmsize_of_entry(&Entry::LinkEdit);
+        let fileoff = self.layout.offset_of_entry(&Entry::StringTable);
+
+        writer.write_u32(macho::LC_SEGMENT_64)?;
+        writer.write_u32(u32::try_from(lc_size).unwrap())?;
+
+        let mut segment_name_bytes = macho::SEG_LINKEDIT.as_bytes().to_vec();
+        segment_name_bytes.resize(16, 0);
+        writer.write(&segment_name_bytes)?;
+
+        writer.write_u64(vmaddr)?; // vmaddr
+        writer.write_u64(vmsize)?; // vmsize
+
+        writer.write_u64(fileoff)?; // fileoff
+        writer.write_u64(vmsize)?; // filesize
+
+        writer.write_u32(macho::VM_PROT_READ)?; // maxprot
+        writer.write_u32(macho::VM_PROT_READ)?; // initprot
+
+        writer.write_u32(0)?; // nsects
+        writer.write_u32(0x00)?; // flags
+
+        Ok(())
+    }
+
     pub fn write_symtab_header<W: Writer>(&self, writer: &mut W) -> Result<()> {
         let lc_size = size_of::<macho::SymtabCommand<NE>>();
 
@@ -411,6 +486,60 @@ impl<'db> Builder<'db> {
 
         writer.write_u32(u32::try_from(stroff).unwrap())?;
         writer.write_u32(u32::try_from(strsize).unwrap())?;
+
+        Ok(())
+    }
+
+    pub fn write_dysymtab_header<W: Writer>(&self, writer: &mut W) -> Result<()> {
+        let sorted_symbols = sort_symbols(self, self.layout.index.symbols.values().copied());
+
+        let mut local_sym_len = 0_u32;
+        let mut ext_sym_len = 0_u32;
+
+        for symbol_id in sorted_symbols.iter().copied() {
+            let linkage = self.layout.db.symbol(symbol_id).unwrap().linkage;
+
+            match linkage {
+                Linkage::Local | Linkage::Global => {
+                    local_sym_len += 1;
+                }
+                Linkage::External => {
+                    ext_sym_len += 1;
+                }
+            }
+        }
+
+        let lc_size = size_of::<macho::DysymtabCommand<NE>>();
+
+        writer.write_u32(macho::LC_DYSYMTAB)?;
+        writer.write_u32(u32::try_from(lc_size).unwrap())?;
+
+        writer.write_u32(0)?; // ilocalsym
+        writer.write_u32(local_sym_len)?; // nlocalsym
+
+        writer.write_u32(local_sym_len)?; // iextdefsym
+        writer.write_u32(ext_sym_len)?; // nextdefsym
+
+        writer.write_u32(local_sym_len)?; // iundefsym
+        writer.write_u32(0)?; // nundefsym
+
+        writer.write_u32(0)?; // tocoff
+        writer.write_u32(0)?; // ntoc
+
+        writer.write_u32(0)?; // modtaboff
+        writer.write_u32(0)?; // nmodtab
+
+        writer.write_u32(0)?; // extrefsymoff
+        writer.write_u32(0)?; // nextrefsyms
+
+        writer.write_u32(0)?; // indirectsymoff
+        writer.write_u32(0)?; // nindirectsyms
+
+        writer.write_u32(0)?; // extreloff
+        writer.write_u32(0)?; // nextrel
+
+        writer.write_u32(0)?; // locreloff
+        writer.write_u32(0)?; // nlocrel
 
         Ok(())
     }
@@ -484,7 +613,9 @@ impl<'db> Builder<'db> {
     }
 
     pub fn write_symbol_table<W: Writer>(&self, writer: &mut W) -> Result<()> {
-        for symbol_id in self.layout.index.symbols.values().copied() {
+        let sorted_symbols = sort_symbols(self, self.layout.index.symbols.values().copied());
+
+        for symbol_id in sorted_symbols {
             let symbol = self.layout.db.symbol(symbol_id).unwrap();
             let nstrx = *self.string_table.get(&symbol.name).unwrap();
 
@@ -526,6 +657,24 @@ impl<'db> Builder<'db> {
 
         writer.write_u64(entryoff)?; // entryoff
         writer.write_u64(stacksize)?; // stacksize
+
+        Ok(())
+    }
+
+    pub fn write_dylinker<W: Writer>(&self, writer: &mut W) -> Result<()> {
+        let cmd_size = size_of::<macho::DylinkerCommand<NE>>() as u64;
+        let lc_size = align_to(cmd_size + DYLINKER_NAME.len() as u64 + 1, align_of::<u64>() as u64);
+
+        writer.write_u32(macho::LC_LOAD_DYLINKER)?;
+        writer.write_u32(u32::try_from(lc_size).unwrap())?;
+
+        // The linker name is placed right after the load command
+        writer.write_u32(u32::try_from(cmd_size).unwrap())?; // name
+
+        writer.write(DYLINKER_NAME.as_bytes())?;
+        writer.write_u8(0)?;
+
+        writer.align_to(align_of::<u64>())?;
 
         Ok(())
     }

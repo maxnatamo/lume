@@ -9,6 +9,9 @@ pub(crate) mod write;
 
 pub(crate) use write::{declare_layout, emit_layout};
 
+/// Name of the dynamic linker to use.
+const DYLINKER_NAME: &str = "/usr/lib/dyld";
+
 /// Default page zero size for the linker (only used on macOS).
 pub const PAGE_ZERO_SIZE_64: u64 = 0x0000_0001_0000_0000;
 
@@ -29,8 +32,17 @@ pub(crate) enum Entry {
         sections: Vec<OutputSectionId>,
     },
 
-    /// Data for a single section with the given ID.
-    SectionData(OutputSectionId),
+    /// Header for the `__LINKEDIT` segment.
+    LinkEdit,
+
+    /// Load dynamic library of the given ID
+    DylibHeader(LibraryId),
+
+    /// Load command for the symbol table
+    SymbolTableHeader,
+
+    /// Load command for the dynamic symbol table
+    DynamicSymbolTableHeader,
 
     /// Table of all symbols in the file
     SymbolTable,
@@ -38,14 +50,14 @@ pub(crate) enum Entry {
     /// Table of all interned strings in the file
     StringTable,
 
-    /// Load dynamic library of the given ID
-    DylibHeader(LibraryId),
-
-    /// Load command for the symbol header
-    SymbolTableHeader,
-
     /// Load command for the entrypoint address
     Entrypoint,
+
+    /// Load command for loading the dynamic linker
+    LoadDylinker,
+
+    /// Data for a single section with the given ID.
+    SectionData(OutputSectionId),
 }
 
 impl Entry {
@@ -56,9 +68,12 @@ impl Entry {
             self,
             Entry::PageZero
                 | Entry::SegmentHeader { .. }
+                | Entry::LinkEdit
                 | Entry::SymbolTableHeader
+                | Entry::DynamicSymbolTableHeader
                 | Entry::DylibHeader(_)
                 | Entry::Entrypoint
+                | Entry::LoadDylinker
         )
     }
 }
@@ -73,7 +88,7 @@ impl SizedEntry for Entry {
                     size_of::<macho::MachHeader32<NE>>() as u64
                 }
             }
-            Entry::PageZero => {
+            Entry::PageZero | Entry::LinkEdit => {
                 if builder.target.is_64bit() {
                     size_of::<macho::SegmentCommand64<NE>>() as u64
                 } else {
@@ -125,7 +140,15 @@ impl SizedEntry for Entry {
                 dylib_size
             }
             Entry::SymbolTableHeader => size_of::<macho::SymtabCommand<NE>>() as u64,
+            Entry::DynamicSymbolTableHeader => size_of::<macho::DysymtabCommand<NE>>() as u64,
             Entry::Entrypoint => size_of::<macho::EntryPointCommand<NE>>() as u64,
+            Entry::LoadDylinker => {
+                let mut dylinker_size = size_of::<macho::DylinkerCommand<NE>>() as u64;
+                dylinker_size += DYLINKER_NAME.len() as u64 + 1;
+                dylinker_size = align_to(dylinker_size, align_of::<u64>() as u64);
+
+                dylinker_size
+            }
         }
     }
 
@@ -134,11 +157,12 @@ impl SizedEntry for Entry {
             Entry::FileHeader
             | Entry::PageZero
             | Entry::SegmentHeader { .. }
-            | Entry::StringTable
-            | Entry::SymbolTable
             | Entry::DylibHeader(_)
             | Entry::SymbolTableHeader
-            | Entry::Entrypoint => 1,
+            | Entry::DynamicSymbolTableHeader
+            | Entry::Entrypoint
+            | Entry::LoadDylinker => 1,
+            Entry::LinkEdit | Entry::StringTable | Entry::SymbolTable => 4,
             Entry::SectionData(section_id) => builder.db.output_section(*section_id).alignment as u64,
         }
     }
@@ -150,6 +174,7 @@ impl EntryDisplay for Entry {
             Self::FileHeader => write!(w, "FileHeader"),
             Self::PageZero => write!(w, "PageZero"),
             Self::SegmentHeader { segment_name, .. } => write!(w, "SegmentHeader, {segment_name}"),
+            Self::LinkEdit => write!(w, "Linkedit"),
             Self::SectionData(section_id) => {
                 write!(w, "SectionData, {}", builder.db.output_section(*section_id).name)
             }
@@ -159,7 +184,9 @@ impl EntryDisplay for Entry {
                 write!(w, "DylibHeader, {}", builder.db.library(*library_id).path.display())
             }
             Self::SymbolTableHeader => write!(w, "SymbolTableHeader"),
+            Self::DynamicSymbolTableHeader => write!(w, "DynamicSymbolTableHeader"),
             Self::Entrypoint => write!(w, "Entrypoint"),
+            Self::LoadDylinker => write!(w, "LoadDylinker"),
         }
     }
 }

@@ -34,6 +34,16 @@ pub struct Config {
 
     #[arg(long, help = "Run all tests sequentially instead of in parallel")]
     pub sequential: bool,
+
+    /// Print output of binary tests
+    #[arg(
+        long,
+        num_args = 0..=1,
+        value_name = "COND",
+        default_value = "never",
+        default_missing_value = "on-failure"
+    )]
+    pub print_output: PrintOutput,
 }
 
 impl Config {
@@ -48,6 +58,16 @@ impl Config {
             .iter()
             .any(|name| test.relative_path.to_string_lossy().contains(name))
     }
+}
+
+#[derive(clap::ValueEnum, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintOutput {
+    /// Never print any binary output
+    #[default]
+    Never,
+
+    /// Only print on failing tests
+    OnFailure,
 }
 
 pub(crate) enum TestResult {
@@ -157,12 +177,12 @@ fn run_test_suite(config: Config, root: &PathBuf, dcx: DiagCtx) -> Result<i32> {
     let results: Vec<TestResult> = if config.sequential {
         collected_tests
             .into_iter()
-            .map(|test| run_test_file(test, dcx.clone()))
+            .map(|test| run_test_file(test, &config, dcx.clone()))
             .collect::<Result<Vec<_>>>()?
     } else {
         collected_tests
             .into_par_iter()
-            .map(|test| run_test_file(test, dcx.clone()))
+            .map(|test| run_test_file(test, &config, dcx.clone()))
             .collect::<Result<Vec<_>>>()?
     };
 
@@ -236,7 +256,7 @@ fn collect_tests(root: &PathBuf, config: &Config) -> Result<Vec<ManifoldCollecte
         .collect::<Result<Vec<_>>>()
 }
 
-fn run_test_file(test_case: ManifoldCollectedTest, dcx: DiagCtx) -> Result<TestResult> {
+fn run_test_file(test_case: ManifoldCollectedTest, config: &Config, dcx: DiagCtx) -> Result<TestResult> {
     panic::set_capture_buf(Arc::default());
 
     let _ = {
@@ -247,7 +267,7 @@ fn run_test_file(test_case: ManifoldCollectedTest, dcx: DiagCtx) -> Result<TestR
     };
 
     if let Ok(result) =
-        std::panic::catch_unwind(|| run_single_test(test_case.test_type, test_case.absolute_path.clone(), dcx))
+        std::panic::catch_unwind(|| run_single_test(test_case.test_type, test_case.absolute_path.clone(), config, dcx))
     {
         return result;
     }
@@ -280,12 +300,17 @@ fn run_test_file(test_case: ManifoldCollectedTest, dcx: DiagCtx) -> Result<TestR
     })
 }
 
-fn run_single_test(test_type: ManifoldTestType, test_file_path: PathBuf, dcx: DiagCtx) -> Result<TestResult> {
+fn run_single_test(
+    test_type: ManifoldTestType,
+    test_file_path: PathBuf,
+    config: &Config,
+    dcx: DiagCtx,
+) -> Result<TestResult> {
     Ok(match test_type {
         ManifoldTestType::Ui => ui::run_test(test_file_path)?,
         ManifoldTestType::Hir => hir::run_test(test_file_path)?,
         ManifoldTestType::Mir => mir::run_test(test_file_path)?,
-        ManifoldTestType::Binary => binary::run_test(test_file_path, dcx)?,
+        ManifoldTestType::Binary => binary::run_test(test_file_path, config, dcx)?,
     })
 }
 
