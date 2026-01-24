@@ -25,6 +25,9 @@ pub(crate) fn declare_layout(builder: &mut LayoutBuilder<Entry>) {
     builder.declare_entry(Entry::SymbolTableHeader);
     builder.declare_entry(Entry::DynamicSymbolTableHeader);
     builder.declare_entry(Entry::LoadDylinker);
+    builder.declare_entry(Entry::Uuid);
+    builder.declare_entry(Entry::BuildVersion);
+    builder.declare_entry(Entry::SourceVersion);
 
     for library_id in builder.required_library_ids() {
         builder.declare_entry(Entry::DylibHeader(library_id));
@@ -110,6 +113,9 @@ pub(crate) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<Entry>) -> R
             Entry::SymbolTable => builder.write_symbol_table(writer)?,
             Entry::Entrypoint => builder.write_entrypoint(writer)?,
             Entry::LoadDylinker => builder.write_dylinker(writer)?,
+            Entry::Uuid => builder.write_uuid(writer)?,
+            Entry::BuildVersion => builder.write_build_version(writer)?,
+            Entry::SourceVersion => builder.write_source_version(writer)?,
         }
 
         let written_bytes = writer.len() - current_length;
@@ -675,6 +681,56 @@ impl<'db> Builder<'db> {
         writer.write_u8(0)?;
 
         writer.align_to(align_of::<u64>())?;
+
+        Ok(())
+    }
+
+    pub fn write_uuid<W: Writer>(&self, writer: &mut W) -> Result<()> {
+        let lc_size = size_of::<macho::UuidCommand<NE>>() as u64;
+
+        writer.write_u32(macho::LC_UUID)?;
+        writer.write_u32(u32::try_from(lc_size).unwrap())?;
+
+        let mut uuid_hi = 0_u64;
+        let mut uuid_lo = 0_u64;
+
+        for file_id in self.layout.db.files.keys() {
+            uuid_hi = lume_span::hash_id(&(uuid_hi, file_id)) as u64;
+        }
+
+        for object in self.layout.db.objects.values() {
+            uuid_lo = lume_span::hash_id(&(uuid_lo, object.id)) as u64;
+        }
+
+        assert_eq!(uuid_hi.to_ne_bytes().len(), 8);
+        assert_eq!(uuid_lo.to_ne_bytes().len(), 8);
+
+        writer.write(&uuid_hi.to_ne_bytes())?;
+        writer.write(&uuid_lo.to_ne_bytes())?;
+
+        Ok(())
+    }
+
+    pub fn write_build_version<W: Writer>(&self, writer: &mut W) -> Result<()> {
+        let lc_size = size_of::<macho::BuildVersionCommand<NE>>() as u64;
+
+        writer.write_u32(macho::LC_BUILD_VERSION)?;
+        writer.write_u32(u32::try_from(lc_size).unwrap())?;
+
+        writer.write_u32(macho::PLATFORM_MACOS)?; // platform
+        writer.write_u32(0x001A_0000)?; // minos
+        writer.write_u32(0x001A_0200)?; // sdk
+        writer.write_u32(0)?; // ntools
+
+        Ok(())
+    }
+
+    pub fn write_source_version<W: Writer>(&self, writer: &mut W) -> Result<()> {
+        let lc_size = size_of::<macho::SourceVersionCommand<NE>>() as u64;
+
+        writer.write_u32(macho::LC_SOURCE_VERSION)?;
+        writer.write_u32(u32::try_from(lc_size).unwrap())?;
+        writer.write_u64(0)?; // version
 
         Ok(())
     }

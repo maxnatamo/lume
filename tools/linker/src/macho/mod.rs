@@ -56,6 +56,15 @@ pub(crate) enum Entry {
     /// Load command for loading the dynamic linker
     LoadDylinker,
 
+    /// UUID load command
+    Uuid,
+
+    /// Build version load command
+    BuildVersion,
+
+    /// Source version load command
+    SourceVersion,
+
     /// Data for a single section with the given ID.
     SectionData(OutputSectionId),
 }
@@ -74,6 +83,9 @@ impl Entry {
                 | Entry::DylibHeader(_)
                 | Entry::Entrypoint
                 | Entry::LoadDylinker
+                | Entry::Uuid
+                | Entry::BuildVersion
+                | Entry::SourceVersion
         )
     }
 }
@@ -149,6 +161,9 @@ impl SizedEntry for Entry {
 
                 dylinker_size
             }
+            Entry::Uuid => size_of::<macho::UuidCommand<NE>>() as u64,
+            Entry::BuildVersion => size_of::<macho::BuildVersionCommand<NE>>() as u64,
+            Entry::SourceVersion => size_of::<macho::SourceVersionCommand<NE>>() as u64,
         }
     }
 
@@ -161,7 +176,10 @@ impl SizedEntry for Entry {
             | Entry::SymbolTableHeader
             | Entry::DynamicSymbolTableHeader
             | Entry::Entrypoint
-            | Entry::LoadDylinker => 1,
+            | Entry::LoadDylinker
+            | Entry::Uuid
+            | Entry::BuildVersion
+            | Entry::SourceVersion => 1,
             Entry::LinkEdit | Entry::StringTable | Entry::SymbolTable => 4,
             Entry::SectionData(section_id) => builder.db.output_section(*section_id).alignment as u64,
         }
@@ -187,6 +205,9 @@ impl EntryDisplay for Entry {
             Self::DynamicSymbolTableHeader => write!(w, "DynamicSymbolTableHeader"),
             Self::Entrypoint => write!(w, "Entrypoint"),
             Self::LoadDylinker => write!(w, "LoadDylinker"),
+            Self::Uuid => write!(w, "Uuid"),
+            Self::BuildVersion => write!(w, "BuildVersion"),
+            Self::SourceVersion => write!(w, "SourceVersion"),
         }
     }
 }
