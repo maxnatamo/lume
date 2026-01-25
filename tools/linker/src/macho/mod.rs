@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use lume_span::Interned;
+use lume_span::{Internable, Interned};
 use object::{NativeEndian as NE, macho};
 
 use crate::common::*;
@@ -19,7 +19,8 @@ pub const PAGE_ZERO_SIZE_64: u64 = 0x0000_0001_0000_0000;
 /// Default page zero size for the linker (only used on macOS).
 pub const PAGE_ZERO_SIZE_32: u64 = 0x0000_0000_0000_1000;
 
-#[derive(Hash, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+#[derive_where::derive_where(Hash, PartialEq, Eq)]
 pub(crate) enum Entry {
     /// Header for the file format.
     FileHeader,
@@ -30,6 +31,8 @@ pub(crate) enum Entry {
     /// Header for a single segment with the given name.
     SegmentHeader {
         segment_name: Interned<String>,
+
+        #[derive_where(skip)]
         sections: Vec<OutputSectionId>,
     },
 
@@ -373,8 +376,12 @@ impl<'db> Builder<'db> {
     /// loaded into memory.
     fn vmaddr_of_unmerged_section(&self, id: InputSectionId) -> u64 {
         let (merged_section, nested_idx) = self.layout.input_section_of(id);
-        let merged_vaddr = self.vmaddr_of_entry(&Entry::SectionData(merged_section.id));
+        let segment_header_entry = Entry::SegmentHeader {
+            segment_name: merged_section.name.segment.clone().unwrap().intern(),
+            sections: Vec::new(),
+        };
 
+        let merged_vaddr = self.vmaddr_of_entry(&segment_header_entry);
         let mut section_vaddr = merged_vaddr;
 
         for contained_section_id in merged_section.merged_from.iter().take(nested_idx) {
