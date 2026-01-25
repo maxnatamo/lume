@@ -4,7 +4,7 @@ use lume_span::Interned;
 use object::{NativeEndian as NE, macho};
 
 use crate::common::*;
-use crate::macho::{DYLINKER_NAME, Entry};
+use crate::macho::{Builder, DYLINKER_NAME, Entry};
 use crate::write::Writer;
 use crate::{DEFAULT_ENTRY, Layout, LayoutBuilder, align_to};
 
@@ -90,6 +90,8 @@ pub(crate) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<Entry>) -> R
         }
         _ => 0,
     });
+
+    builder.apply_relocations();
 
     for (entry, metadata) in builder.layout.clone_entries() {
         let alignment = builder.layout.alignment_of_entry(&entry);
@@ -179,121 +181,7 @@ where
     sorted_symbols
 }
 
-struct Builder<'db> {
-    target: Target,
-    layout: Layout<'db, Entry>,
-
-    /// Defines the virtual placements for each entry within the layout.
-    virtual_places: IndexMap<Entry, Placement>,
-
-    string_table: IndexMap<String, usize>,
-}
-
-impl<'db> Builder<'db> {
-    pub fn new(layout: Layout<'db, Entry>) -> Self {
-        Builder {
-            target: layout.target,
-            layout,
-            virtual_places: IndexMap::new(),
-            string_table: IndexMap::new(),
-        }
-    }
-
-    #[inline]
-    fn magic_number(&self) -> u32 {
-        if self.target.is_64bit() {
-            macho::MH_MAGIC_64
-        } else {
-            macho::MH_MAGIC
-        }
-    }
-
-    #[inline]
-    fn cpu_type(&self) -> u32 {
-        let cpu_type = if self.target.is_arm() {
-            macho::CPU_TYPE_ARM
-        } else if self.target.is_x86() {
-            macho::CPU_TYPE_X86
-        } else {
-            macho::CPU_TYPE_ANY
-        };
-
-        if self.target.is_64bit() {
-            cpu_type | macho::CPU_ARCH_ABI64
-        } else {
-            cpu_type | macho::CPU_ARCH_ABI64_32
-        }
-    }
-
-    #[inline]
-    fn cpu_subtype(&self) -> u32 {
-        match self.target.arch {
-            Architecture::Arm | Architecture::Arm64 => macho::CPU_SUBTYPE_ARM_ALL,
-            Architecture::X86 | Architecture::X86_64 => macho::CPU_SUBTYPE_X86_ALL,
-        }
-    }
-
-    /// Gets the size of a segment load command, in bytes.
-    #[inline]
-    fn segment_hdr_size(&self) -> u64 {
-        if self.target.is_64bit() {
-            size_of::<macho::SegmentCommand64<NE>>() as u64
-        } else {
-            size_of::<macho::SegmentCommand32<NE>>() as u64
-        }
-    }
-
-    /// Gets the size of a section header, in bytes.
-    #[inline]
-    fn section_hdr_size(&self) -> u64 {
-        if self.target.is_64bit() {
-            size_of::<macho::Section64<NE>>() as u64
-        } else {
-            size_of::<macho::Section32<NE>>() as u64
-        }
-    }
-
-    /// Gets the amount of load commands in the Mach-O file.
-    pub fn lc_count(&self) -> u32 {
-        let count = self
-            .layout
-            .entries()
-            .filter_map(|(entry, _meta)| entry.is_load_command().then_some(entry))
-            .count();
-
-        u32::try_from(count).unwrap()
-    }
-
-    /// Gets the size of load commands in the Mach-O file, in bytes.
-    pub fn lc_size(&self) -> u32 {
-        let size = self
-            .layout
-            .entries()
-            .filter_map(|(entry, meta)| {
-                // Note: should also include the size of child headers as well, such as
-                //       section headers which are children of segment headers.
-
-                if entry.is_load_command() {
-                    Some(meta.physical_size)
-                } else {
-                    None
-                }
-            })
-            .sum::<u64>();
-
-        u32::try_from(size).unwrap()
-    }
-
-    /// Gets the virtual size of the given entry when loaded into memory.
-    pub(crate) fn vmsize_of_entry(&self, entry: &Entry) -> u64 {
-        self.virtual_places.get(entry).unwrap().size
-    }
-
-    /// Gets the virtual offset of the given entry when loaded into memory.
-    pub(crate) fn vmaddr_of_entry(&self, entry: &Entry) -> u64 {
-        self.virtual_places.get(entry).unwrap().offset
-    }
-
+impl Builder<'_> {
     pub fn write_file_header<W: Writer>(&self, writer: &mut W) -> Result<()> {
         writer.write_u32(self.magic_number())?;
         writer.write_u32(self.cpu_type())?;
@@ -627,7 +515,8 @@ impl<'db> Builder<'db> {
 
             let n_type = match symbol.linkage {
                 crate::Linkage::External => macho::N_UNDF | macho::N_EXT,
-                crate::Linkage::Global | crate::Linkage::Local => macho::N_SECT,
+                crate::Linkage::Global => macho::N_SECT | macho::N_EXT,
+                crate::Linkage::Local => macho::N_SECT,
             };
 
             let section_idx = symbol.section.and_then(|id| self.section_idx_of(id)).unwrap_or(0);
@@ -641,7 +530,7 @@ impl<'db> Builder<'db> {
             writer.write_u8(n_type)?;
             writer.write_u8(section_idx)?;
             writer.write_u16(n_desc)?;
-            writer.write_u64(symbol.address as u64)?;
+            writer.write_u64(self.vmaddr_of_symbol(symbol_id))?;
         }
 
         Ok(())
@@ -658,7 +547,7 @@ impl<'db> Builder<'db> {
             return Err(SimpleDiagnostic::new(format!("could not find symbol {entrypoint}")).into());
         };
 
-        let entryoff = self.layout.offset_of_symbol(entrypoint_id).unwrap();
+        let entryoff = self.offset_of_symbol(entrypoint_id).unwrap();
         let stacksize = self.layout.config.stack_size.unwrap_or(0);
 
         writer.write_u64(entryoff)?; // entryoff

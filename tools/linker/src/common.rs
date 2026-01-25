@@ -184,10 +184,27 @@ pub struct Symbol {
     pub object: ObjectId,
 
     pub name: String,
-    pub address: usize,
+    pub address: SymbolAddress,
     pub size: usize,
     pub linkage: Linkage,
     pub section: Option<InputSectionId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolAddress {
+    /// The symbol address is invalid or otherwise unknown, given the input
+    /// object format.
+    Unknown,
+
+    /// The symbol is not defined within this object and has no address.
+    Undefined,
+
+    /// The address of the symbol is absolute and mustn't be changed.
+    Absolute(u64),
+
+    /// The address of the symbol is relative to the start of the parent
+    /// section or segment (depending on the format).
+    Relative(u64),
 }
 
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]

@@ -131,7 +131,12 @@ fn object_from<N: Hash>(file: InputFileId, name: &N, object: object::File) -> Ob
     for obj_symbol in object.symbols() {
         let name = obj_symbol.name().expect("symbol name not UTF-8");
         let size = obj_symbol.size();
-        let address = obj_symbol.address();
+
+        let address = match obj_symbol.section() {
+            object::SymbolSection::Absolute => SymbolAddress::Absolute(obj_symbol.address()),
+            object::SymbolSection::Section(_) => SymbolAddress::Relative(obj_symbol.address()),
+            _ => SymbolAddress::Unknown,
+        };
 
         let section = obj_symbol
             .section_index()
@@ -151,7 +156,7 @@ fn object_from<N: Hash>(file: InputFileId, name: &N, object: object::File) -> Ob
             id,
             object: object_id,
             name: name.to_owned(),
-            address: usize::try_from(address).unwrap(),
+            address,
             size: usize::try_from(size).unwrap(),
             linkage,
             section,
@@ -166,7 +171,7 @@ fn object_from<N: Hash>(file: InputFileId, name: &N, object: object::File) -> Ob
             id,
             object: object_id,
             name: symbol_name.to_owned(),
-            address: 0,
+            address: SymbolAddress::Undefined,
             size: 0,
             linkage: Linkage::External,
             section: None,

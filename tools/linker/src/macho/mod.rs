@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 use lume_span::Interned;
 use object::{NativeEndian as NE, macho};
 
@@ -212,48 +213,172 @@ impl EntryDisplay for Entry {
     }
 }
 
-impl Layout<'_, Entry> {
+struct Builder<'db> {
+    target: Target,
+    layout: Layout<'db, Entry>,
+
+    /// Defines the virtual placements for each entry within the layout.
+    virtual_places: IndexMap<Entry, Placement>,
+
+    string_table: IndexMap<String, usize>,
+}
+
+impl<'db> Builder<'db> {
+    pub fn new(layout: Layout<'db, Entry>) -> Self {
+        Builder {
+            target: layout.target,
+            layout,
+            virtual_places: IndexMap::new(),
+            string_table: IndexMap::new(),
+        }
+    }
+
+    #[inline]
+    fn magic_number(&self) -> u32 {
+        if self.target.is_64bit() {
+            macho::MH_MAGIC_64
+        } else {
+            macho::MH_MAGIC
+        }
+    }
+
+    #[inline]
+    fn cpu_type(&self) -> u32 {
+        let cpu_type = if self.target.is_arm() {
+            macho::CPU_TYPE_ARM
+        } else if self.target.is_x86() {
+            macho::CPU_TYPE_X86
+        } else {
+            macho::CPU_TYPE_ANY
+        };
+
+        if self.target.is_64bit() {
+            cpu_type | macho::CPU_ARCH_ABI64
+        } else {
+            cpu_type | macho::CPU_ARCH_ABI64_32
+        }
+    }
+
+    #[inline]
+    fn cpu_subtype(&self) -> u32 {
+        match self.target.arch {
+            Architecture::Arm | Architecture::Arm64 => macho::CPU_SUBTYPE_ARM_ALL,
+            Architecture::X86 | Architecture::X86_64 => macho::CPU_SUBTYPE_X86_ALL,
+        }
+    }
+
+    /// Gets the size of a segment load command, in bytes.
+    #[inline]
+    fn segment_hdr_size(&self) -> u64 {
+        if self.target.is_64bit() {
+            size_of::<macho::SegmentCommand64<NE>>() as u64
+        } else {
+            size_of::<macho::SegmentCommand32<NE>>() as u64
+        }
+    }
+
+    /// Gets the size of a section header, in bytes.
+    #[inline]
+    fn section_hdr_size(&self) -> u64 {
+        if self.target.is_64bit() {
+            size_of::<macho::Section64<NE>>() as u64
+        } else {
+            size_of::<macho::Section32<NE>>() as u64
+        }
+    }
+
+    /// Gets the amount of load commands in the Mach-O file.
+    pub fn lc_count(&self) -> u32 {
+        let count = self
+            .layout
+            .entries()
+            .filter_map(|(entry, _meta)| entry.is_load_command().then_some(entry))
+            .count();
+
+        u32::try_from(count).unwrap()
+    }
+
+    /// Gets the size of load commands in the Mach-O file, in bytes.
+    pub fn lc_size(&self) -> u32 {
+        let size = self
+            .layout
+            .entries()
+            .filter_map(|(entry, meta)| {
+                // Note: should also include the size of child headers as well, such as
+                //       section headers which are children of segment headers.
+
+                if entry.is_load_command() {
+                    Some(meta.physical_size)
+                } else {
+                    None
+                }
+            })
+            .sum::<u64>();
+
+        u32::try_from(size).unwrap()
+    }
+
+    /// Gets the virtual size of the given entry when loaded into memory.
+    fn vmsize_of_entry(&self, entry: &Entry) -> u64 {
+        self.virtual_places.get(entry).unwrap().size
+    }
+
+    /// Gets the virtual offset of the given entry when loaded into memory.
+    fn vmaddr_of_entry(&self, entry: &Entry) -> u64 {
+        self.virtual_places.get(entry).unwrap().offset
+    }
+
     /// Gets the file offset of the symbol with the given ID.
-    pub(crate) fn offset_of_symbol(&self, id: SymbolId) -> Option<u64> {
-        let symbol = self.db.symbol(id).unwrap();
+    ///
+    /// If the symbol with the given ID has no parent section, this method
+    /// returns [`None`].
+    fn offset_of_symbol(&self, id: SymbolId) -> Option<u64> {
+        let symbol = self.layout.db.symbol(id).unwrap();
         let section_id = symbol.section?;
 
-        let (merged_section, nested_idx) = self.input_section_of(section_id);
-        let mut parent_section_offset = self.offset_of_entry(&Entry::SectionData(merged_section.id));
+        let SymbolAddress::Relative(relative_address) = symbol.address else {
+            return None;
+        };
 
-        for contained_section_id in merged_section.merged_from.iter().take(nested_idx + 1) {
-            let contained_section = self.db.input_section(*contained_section_id);
+        let (merged_section, nested_idx) = self.layout.input_section_of(section_id);
+        let mut parent_section_offset = self.layout.offset_of_entry(&Entry::SectionData(merged_section.id));
+
+        for contained_section_id in merged_section.merged_from.iter().take(nested_idx) {
+            let contained_section = self.layout.db.input_section(*contained_section_id);
             parent_section_offset += contained_section.data.len() as u64;
         }
 
-        Some(parent_section_offset + symbol.address as u64)
+        Some(parent_section_offset + relative_address)
     }
 
     /// Gets the virtual address of the symbol with the given ID when loaded
     /// into memory.
-    pub(crate) fn vaddr_of_symbol(&self, id: SymbolId) -> u64 {
-        let symbol = self.db.symbol(id).unwrap();
+    fn vmaddr_of_symbol(&self, id: SymbolId) -> u64 {
+        let symbol = self.layout.db.symbol(id).unwrap();
 
-        let Some(section_id) = symbol.section else {
-            return symbol.address as u64;
-        };
+        match symbol.address {
+            SymbolAddress::Unknown | SymbolAddress::Undefined => 0,
+            SymbolAddress::Absolute(addr) => addr,
+            SymbolAddress::Relative(section_offset) => {
+                let Some(section_id) = symbol.section else {
+                    unreachable!("relative symbols must have parent section");
+                };
 
-        let section_vaddr = self.vaddr_of_unmerged_section(section_id);
-        let symbol_addr = symbol.address as u64;
-
-        section_vaddr + symbol_addr
+                self.vmaddr_of_unmerged_section(section_id) + section_offset
+            }
+        }
     }
 
     /// Gets the virtual address of the unmerged section with the given ID when
     /// loaded into memory.
-    pub(crate) fn vaddr_of_unmerged_section(&self, id: InputSectionId) -> u64 {
-        let (merged_section, nested_idx) = self.input_section_of(id);
-        let merged_vaddr = self.offset_of_entry(&Entry::SectionData(merged_section.id));
+    fn vmaddr_of_unmerged_section(&self, id: InputSectionId) -> u64 {
+        let (merged_section, nested_idx) = self.layout.input_section_of(id);
+        let merged_vaddr = self.vmaddr_of_entry(&Entry::SectionData(merged_section.id));
 
         let mut section_vaddr = merged_vaddr;
 
-        for contained_section_id in merged_section.merged_from.iter().take(nested_idx + 1) {
-            let contained_section = self.db.input_section(*contained_section_id);
+        for contained_section_id in merged_section.merged_from.iter().take(nested_idx) {
+            let contained_section = self.layout.db.input_section(*contained_section_id);
             section_vaddr += contained_section.data.len() as u64;
         }
 

@@ -10,8 +10,7 @@ pub(crate) fn write_to<W: Writer>(writer: &mut W, linker: &mut Linker) -> Result
             let mut builder = LayoutBuilder::<macho::Entry>::new(linker);
             macho::declare_layout(&mut builder);
 
-            let mut layout = builder.into_layout();
-            layout.apply_relocations();
+            let layout = builder.into_layout();
 
             #[allow(clippy::disallowed_macros, reason = "used for non-logging purposes in the CLI")]
             if print_entries {
