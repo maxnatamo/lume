@@ -115,6 +115,7 @@ impl LibraryId {
 pub struct Library {
     pub id: LibraryId,
     pub path: PathBuf,
+    pub required: bool,
     pub symbols: Vec<DynamicSymbol>,
 }
 

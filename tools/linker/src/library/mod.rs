@@ -11,6 +11,28 @@ use crate::common::*;
 mod tbd;
 
 #[derive(Clone)]
+struct LibraryName {
+    pub name: String,
+    pub required: bool,
+}
+
+impl LibraryName {
+    pub fn required<N: Into<String>>(name: N) -> Self {
+        Self {
+            name: name.into(),
+            required: true,
+        }
+    }
+
+    pub fn optional<N: Into<String>>(name: N) -> Self {
+        Self {
+            name: name.into(),
+            required: false,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ParsedLibrary {
     pub path: PathBuf,
     pub symbols: Vec<ParsedDynamicSymbol>,
@@ -28,9 +50,9 @@ pub(crate) fn read_libraries(config: &Config, target: Target) -> Result<IndexMap
     let mut libraries = IndexMap::new();
 
     for library_name in library_names {
-        let Some(lib_path) = search_library(&search_paths, &library_name) else {
+        let Some(lib_path) = search_library(&search_paths, &library_name.name) else {
             return Err(
-                SimpleDiagnostic::new(format!("could not find library `{library_name}`"))
+                SimpleDiagnostic::new(format!("could not find library `{}`", library_name.name))
                     .add_causes(search_paths.iter().map(|path| {
                         SimpleDiagnostic::new(format!("searched in {}", path.display())).with_severity(Severity::Info)
                     }))
@@ -52,6 +74,7 @@ pub(crate) fn read_libraries(config: &Config, target: Target) -> Result<IndexMap
             let entry = libraries.entry(lib_id).or_insert(Library {
                 id: lib_id,
                 path: parsed_lib.path,
+                required: library_name.required,
                 symbols: Vec::new(),
             });
 
@@ -62,12 +85,19 @@ pub(crate) fn read_libraries(config: &Config, target: Target) -> Result<IndexMap
     Ok(libraries)
 }
 
-fn default_libraries(config: &Config) -> Vec<String> {
-    let mut libs = config.libraries.clone();
+fn default_libraries(config: &Config) -> Vec<LibraryName> {
+    let mut libs: Vec<_> = config.libraries.iter().map(LibraryName::optional).collect();
 
-    libs.push(String::from("System"));
-    libs.push(String::from("c"));
-    libs.push(String::from("m"));
+    #[cfg(unix)]
+    {
+        libs.push(LibraryName::required("c"));
+        libs.push(LibraryName::optional("m"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        libs.push(LibraryName::required("System"));
+    }
 
     libs
 }

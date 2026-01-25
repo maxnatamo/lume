@@ -59,7 +59,13 @@ impl<'db, E: SizedEntry> LayoutBuilder<'db, E> {
 
     /// Gets a set of all required library IDs.
     pub(crate) fn required_library_ids(&self) -> IndexSet<LibraryId> {
-        self.index.dynamic_symbols.values().copied().collect::<IndexSet<_>>()
+        let mut library_ids: IndexSet<_> = self.index.dynamic_symbols.values().copied().collect();
+
+        for required_lib in self.db.libraries.values().filter(|lib| lib.required) {
+            library_ids.insert(required_lib.id);
+        }
+
+        library_ids
     }
 
     /// Gets the physical size of the section with the given ID, in bytes.
