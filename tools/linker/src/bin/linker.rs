@@ -67,6 +67,14 @@ pub(crate) struct Arguments {
     #[arg(short = 'o', long, value_name = "OUTPUT", value_hint = clap::ValueHint::FilePath, required = true)]
     pub output: PathBuf,
 
+    /// Search the given library when linking.
+    #[arg(short = 'l', value_name = "LIB")]
+    pub libraries: Vec<String>,
+
+    /// Add directory to library search path
+    #[arg(short = 'L', value_name = "DIR")]
+    pub search_paths: Vec<PathBuf>,
+
     /// Name of the entry point symbol
     #[arg(long, value_name = "ENTRY")]
     pub entry: Option<String>,
@@ -86,8 +94,8 @@ fn main() {
 
     let config = linker::Config {
         entry: args.entry,
-        search_paths: None,
-        libraries: Vec::new(),
+        search_paths: args.search_paths,
+        libraries: args.libraries,
         stack_size: args.stack_size,
         print_entries: args.print_entries,
     };

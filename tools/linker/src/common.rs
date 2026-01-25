@@ -23,10 +23,6 @@ impl Target {
     pub fn is_arm(self) -> bool {
         self.arch.is_arm()
     }
-
-    pub fn has_page_zero(self) -> bool {
-        self.format == Format::MachO
-    }
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]

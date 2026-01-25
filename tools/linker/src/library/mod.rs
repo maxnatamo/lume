@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use error_snippet::Severity;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use lume_errors::{Result, SimpleDiagnostic};
 
 use crate::Config;
@@ -11,8 +11,11 @@ use crate::common::*;
 mod tbd;
 
 #[derive(Clone)]
+#[derive_where::derive_where(PartialEq, Eq, Hash)]
 struct LibraryName {
     pub name: String,
+
+    #[derive_where(skip)]
     pub required: bool,
 }
 
@@ -85,19 +88,21 @@ pub(crate) fn read_libraries(config: &Config, target: Target) -> Result<IndexMap
     Ok(libraries)
 }
 
-fn default_libraries(config: &Config) -> Vec<LibraryName> {
-    let mut libs: Vec<_> = config.libraries.iter().map(LibraryName::optional).collect();
+fn default_libraries(config: &Config) -> IndexSet<LibraryName> {
+    let mut libs = IndexSet::new();
 
     #[cfg(unix)]
     {
-        libs.push(LibraryName::required("c"));
-        libs.push(LibraryName::optional("m"));
+        libs.insert(LibraryName::required("c"));
+        libs.insert(LibraryName::optional("m"));
     }
 
     #[cfg(target_os = "macos")]
     {
-        libs.push(LibraryName::required("System"));
+        libs.insert(LibraryName::required("System"));
     }
+
+    libs.extend(config.libraries.iter().map(LibraryName::optional));
 
     libs
 }
@@ -115,7 +120,7 @@ fn library_search_paths(config: &Config) -> Result<Vec<PathBuf>> {
             .collect()
     }
 
-    let mut paths = config.search_paths.clone().unwrap_or_default();
+    let mut paths = config.search_paths.clone();
 
     #[cfg(unix)]
     {

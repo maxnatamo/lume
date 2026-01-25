@@ -25,7 +25,7 @@ pub struct Config {
     pub entry: Option<String>,
 
     /// List of library search paths
-    pub search_paths: Option<Vec<PathBuf>>,
+    pub search_paths: Vec<PathBuf>,
 
     /// List of libraries to link against
     pub libraries: Vec<String>,
