@@ -23,5 +23,8 @@ object = { version = "0.37", features = ["read"] }
 serde = { workspace = true, features = ["derive"] }
 serde-saphyr = { version = "0.0.14" }
 
+[build-dependencies]
+cc = { version = "1.2" }
+
 [lints]
 workspace = true
