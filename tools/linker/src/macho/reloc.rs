@@ -1,15 +1,15 @@
 use crate::RelocationTarget;
-use crate::macho::Builder;
+use crate::macho::layout::Layout;
 
-impl Builder<'_> {
+impl Layout<'_> {
     pub(crate) fn apply_relocations(&mut self) {
-        let output_section_ids = self.layout.db.output_sections().map(|sec| sec.id).collect::<Vec<_>>();
+        let output_section_ids = self.ctx.db.output_sections().map(|sec| sec.id).collect::<Vec<_>>();
 
         for output_section_id in output_section_ids {
-            let input_section_ids = self.layout.db.output_section(output_section_id).merged_from.clone();
+            let input_section_ids = self.ctx.db.output_section(output_section_id).merged_from.clone();
 
             for input_section_id in input_section_ids {
-                let section = self.layout.db.input_section(input_section_id);
+                let section = self.ctx.db.input_section(input_section_id);
                 let relocations = section.relocations.clone();
 
                 for relocation in relocations {
@@ -27,7 +27,7 @@ impl Builder<'_> {
                         )
                     });
 
-                    let section = self.layout.db.input_section_mut(input_section_id);
+                    let section = self.ctx.db.input_section_mut(input_section_id);
                     let target_address_bytes = target_address.to_ne_bytes();
 
                     section.data[reloc_offset..reloc_offset + relocation.length as usize]

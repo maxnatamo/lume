@@ -12,10 +12,10 @@ pub const DEFAULT_ENTRY: &str = "_main";
 
 pub(crate) trait SizedEntry: Hash + Debug + Clone + PartialEq + Eq {
     /// Gets the physical size of the entry within the file.
-    fn physical_size(entry: &Self, builder: &LayoutBuilder<Self>) -> u64;
+    fn physical_size(entry: &Self, ctx: &Context<Self>) -> u64;
 
     /// Gets the requirement alignment of the entry.
-    fn alignment(entry: &Self, builder: &LayoutBuilder<Self>) -> u64;
+    fn alignment(entry: &Self, ctx: &Context<Self>) -> u64;
 }
 
 pub(crate) trait EntryDisplay
@@ -23,19 +23,32 @@ where
     Self: SizedEntry,
 {
     /// Displays the name of the entry in a human-readable way.
-    fn fmt(&self, builder: &Layout<Self>, w: &mut dyn std::fmt::Write) -> std::fmt::Result;
+    fn fmt(&self, ctx: &Context<Self>, w: &mut dyn std::fmt::Write) -> std::fmt::Result;
 }
 
-pub(crate) struct LayoutBuilder<'db, E: SizedEntry> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EntryMetadata {
+    /// Defines the physical size of the entry in the output file.
+    pub(crate) physical_size: u64,
+
+    /// Defines the offset of the entry in the output file.
+    pub(crate) physical_offset: u64,
+
+    /// Defines the alignment of the entry.
+    pub(crate) alignment: u64,
+}
+
+pub(crate) struct Context<'db, E: SizedEntry> {
     pub(crate) target: Target,
     pub(crate) db: &'db mut Database,
     pub(crate) index: &'db Index,
     pub(crate) config: &'db Config,
 
-    entries: IndexSet<E>,
+    current_offset: u64,
+    entries: IndexMap<E, EntryMetadata>,
 }
 
-impl<'db, E: SizedEntry> LayoutBuilder<'db, E> {
+impl<'db, E: SizedEntry> Context<'db, E> {
     /// Creates a new layout builder for the given target.
     pub(crate) fn new(linker: &'db mut Linker) -> Self {
         Self {
@@ -43,13 +56,25 @@ impl<'db, E: SizedEntry> LayoutBuilder<'db, E> {
             db: &mut linker.db,
             index: &linker.index,
             config: &linker.config,
-            entries: IndexSet::new(),
+            current_offset: 0,
+            entries: IndexMap::new(),
         }
     }
 
     /// Declares a new entry with the given kind.
-    pub(crate) fn declare_entry(&mut self, kind: E) {
-        self.entries.insert(kind);
+    pub(crate) fn declare_entry(&mut self, entry: E) {
+        let alignment = E::alignment(&entry, self);
+        let physical_size = E::physical_size(&entry, self);
+
+        let physical_offset = align_to(self.current_offset, alignment);
+
+        self.entries.insert(entry, EntryMetadata {
+            physical_size,
+            physical_offset,
+            alignment,
+        });
+
+        self.current_offset = physical_offset + physical_size;
     }
 
     /// Gets an iterator over all segment names in the layout.
@@ -68,75 +93,26 @@ impl<'db, E: SizedEntry> LayoutBuilder<'db, E> {
         library_ids
     }
 
-    /// Gets the physical size of the section with the given ID, in bytes.
-    ///
-    /// If the end of the section boundary was not on a aligned boundary,
-    /// the size will be rounded up to the next aligned boundary.
-    pub(crate) fn size_of_section(&self, id: OutputSectionId) -> u64 {
-        let merged_section = self.db.output_section(id);
-        if !merged_section.occupies_space() {
-            return 0;
-        }
-
-        align_to(merged_section.size, merged_section.alignment as u64)
-    }
-
-    /// Consumes the builder and creates a new [`Layout`].
-    pub(crate) fn into_layout(mut self) -> Layout<'db, E> {
-        let mut entries = IndexMap::new();
-
-        let mut current_offset = 0;
-
-        for entry in std::mem::take(&mut self.entries) {
-            let alignment = E::alignment(&entry, &self);
-            let physical_size = E::physical_size(&entry, &self);
-
-            let physical_offset = align_to(current_offset, alignment);
-
-            entries.insert(entry, EntryMetadata {
-                physical_size,
-                physical_offset,
-                alignment,
-            });
-
-            current_offset = physical_offset + physical_size;
-        }
-
-        Layout {
-            target: self.target,
-            db: self.db,
-            index: self.index,
-            config: self.config,
-            entries,
-        }
+    /// Gets the input section of the section with the given ID, along with
+    /// the index inside the output section.
+    pub(crate) fn input_section_of(&self, id: InputSectionId) -> (&OutputSection, usize) {
+        self.db
+            .output_sections
+            .values()
+            .find_map(|merged| merged.merged_from.get_index_of(&id).map(|idx| (merged, idx)))
+            .unwrap()
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EntryMetadata {
-    /// Defines the physical size of the entry in the output file.
-    pub(crate) physical_size: u64,
-
-    /// Defines the offset of the entry in the output file.
-    pub(crate) physical_offset: u64,
-
-    /// Defines the alignment of the entry.
-    pub(crate) alignment: u64,
-}
-
-pub(crate) struct Layout<'db, E: SizedEntry> {
-    pub(crate) target: Target,
-    pub(crate) db: &'db mut Database,
-    pub(crate) index: &'db Index,
-    pub(crate) config: &'db Config,
-
-    pub(crate) entries: IndexMap<E, EntryMetadata>,
-}
-
-impl<E: SizedEntry> Layout<'_, E> {
+impl<E: SizedEntry> Context<'_, E> {
     /// Gets an iterator over all entries in the layout.
-    pub(crate) fn entries(&self) -> impl Iterator<Item = (&E, &EntryMetadata)> {
+    pub(crate) fn iter_entries(&self) -> impl Iterator<Item = (&E, &EntryMetadata)> {
         self.entries.iter()
+    }
+
+    /// Gets a reference to the entries in the layout.
+    pub(crate) fn entries(&self) -> &IndexMap<E, EntryMetadata> {
+        &self.entries
     }
 
     /// Clones the entries from the layout and returns them.
@@ -160,7 +136,7 @@ impl<E: SizedEntry> Layout<'_, E> {
     }
 }
 
-impl<E: EntryDisplay> std::fmt::Display for Layout<'_, E> {
+impl<E: EntryDisplay> std::fmt::Display for Context<'_, E> {
     /// Displays the layout of the entries in the standard output.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (entry, metadata) in &self.entries {
@@ -178,22 +154,24 @@ impl<E: EntryDisplay> std::fmt::Display for Layout<'_, E> {
     }
 }
 
-impl<E: SizedEntry> Layout<'_, E> {
-    /// Gets the input section of the section with the given ID, along with
-    /// the index inside the output section.
-    pub(crate) fn input_section_of(&self, id: InputSectionId) -> (&OutputSection, usize) {
-        self.db
-            .output_sections
-            .values()
-            .find_map(|merged| merged.merged_from.get_index_of(&id).map(|idx| (merged, idx)))
-            .unwrap()
-    }
-}
-
+/// Aligns the given address up to the given alignment.
+///
+/// The returned address is guaranteed to be greater than or equal to the given
+/// address.
 pub(crate) fn align_to(addr: u64, align: u64) -> u64 {
+    assert!(align.is_power_of_two(), "`align` must be a power of two");
+
     if align == 0 {
         return addr;
     }
 
     (addr + align - 1) & !(align - 1)
+}
+
+/// Aligns the given address up to the current page size.
+///
+/// The returned address is guaranteed to be greater than or equal to the given
+/// address.
+pub(crate) fn page_align(addr: u64) -> u64 {
+    align_to(addr, crate::native::page_size())
 }

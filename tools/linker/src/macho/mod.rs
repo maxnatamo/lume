@@ -1,14 +1,16 @@
+mod layout;
+mod reloc;
+mod write;
+
+use derive_more::Debug;
 use indexmap::IndexMap;
+use lume_errors::{Result, SimpleDiagnostic};
 use lume_span::{Internable, Interned};
 use object::{NativeEndian as NE, macho};
 
 use crate::common::*;
-use crate::{EntryDisplay, Layout, LayoutBuilder, SizedEntry, align_to};
-
-pub(crate) mod reloc;
-pub(crate) mod write;
-
-pub(crate) use write::{declare_layout, emit_layout};
+use crate::write::Writer;
+use crate::{Context, DEFAULT_ENTRY, EntryDisplay, SizedEntry, align_to};
 
 /// Name of the dynamic linker to use.
 const DYLINKER_NAME: &str = "/usr/lib/dyld";
@@ -19,58 +21,95 @@ pub const PAGE_ZERO_SIZE_64: u64 = 0x0000_0001_0000_0000;
 /// Default page zero size for the linker (only used on macOS).
 pub const PAGE_ZERO_SIZE_32: u64 = 0x0000_0000_0000_1000;
 
-#[derive(Debug, Clone)]
+pub(crate) fn write<W: Writer>(ctx: Context<'_, Entry>, writer: &mut W) -> Result<()> {
+    let entrypoint = ctx.config.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
+    let Some(entrypoint_symbol_id) = ctx.index.symbol_with_name(entrypoint) else {
+        return Err(SimpleDiagnostic::new(format!("could not find symbol {entrypoint}")).into());
+    };
+
+    let string_table = merge_strings(&ctx);
+    let symbol_table = define_symbols(&ctx);
+    let libraries = ctx.required_library_ids();
+
+    let mut layout = layout::Layout::new(ctx, string_table, symbol_table, libraries, entrypoint_symbol_id);
+    layout.declare_layout();
+
+    #[allow(clippy::disallowed_macros, reason = "used for non-logging purposes in the CLI")]
+    if layout.ctx.config.print_entries {
+        println!("{}", layout.ctx);
+    }
+
+    write::emit_to(writer, layout)?;
+
+    Ok(())
+}
+
+#[derive(derive_more::Display, Debug, Clone)]
 #[derive_where::derive_where(Hash, PartialEq, Eq)]
 pub(crate) enum Entry {
     /// Header for the file format.
+    #[display("file header")]
     FileHeader,
 
     /// Header for the page zero segment (__PAGEZERO).
+    #[display("segment __PAGEZERO")]
     PageZero,
 
     /// Header for a single segment with the given name.
-    SegmentHeader {
-        segment_name: Interned<String>,
-
-        #[derive_where(skip)]
-        sections: Vec<OutputSectionId>,
-    },
+    #[display("segment {}", _0.name)]
+    SegmentHeader(SegmentContent),
 
     /// Header for the `__LINKEDIT` segment.
+    #[display("segment __LINKEDIT")]
     LinkEdit,
 
     /// Load dynamic library of the given ID
-    DylibHeader(LibraryId),
+    #[display("dylib {_1}")]
+    DylibHeader(LibraryId, #[derive_where(skip)] Interned<String>),
 
     /// Load command for the symbol table
-    SymbolTableHeader,
+    #[display("symtab")]
+    SymtabHeader,
 
     /// Load command for the dynamic symbol table
-    DynamicSymbolTableHeader,
+    #[display("dysymtab")]
+    DysymtabHeader,
 
     /// Table of all symbols in the file
+    #[display("symbol table")]
     SymbolTable,
 
     /// Table of all interned strings in the file
+    #[display("string table")]
     StringTable,
 
     /// Load command for the entrypoint address
+    #[display("entrypoint")]
     Entrypoint,
 
     /// Load command for loading the dynamic linker
+    #[display("dylinker")]
     LoadDylinker,
 
     /// UUID load command
+    #[display("uuid")]
     Uuid,
 
     /// Build version load command
+    #[display("build version")]
     BuildVersion,
 
     /// Source version load command
+    #[display("source version")]
     SourceVersion,
 
     /// Data for a single section with the given ID.
+    #[display("section")]
     SectionData(OutputSectionId),
+
+    /// Padding for segment address alignment
+    #[display("padding 0x{_0:0X}")]
+    Padding(u64),
 }
 
 impl Entry {
@@ -80,11 +119,11 @@ impl Entry {
         matches!(
             self,
             Entry::PageZero
-                | Entry::SegmentHeader { .. }
+                | Entry::SegmentHeader(_)
                 | Entry::LinkEdit
-                | Entry::SymbolTableHeader
-                | Entry::DynamicSymbolTableHeader
-                | Entry::DylibHeader(_)
+                | Entry::SymtabHeader
+                | Entry::DysymtabHeader
+                | Entry::DylibHeader(_, _)
                 | Entry::Entrypoint
                 | Entry::LoadDylinker
                 | Entry::Uuid
@@ -92,71 +131,75 @@ impl Entry {
                 | Entry::SourceVersion
         )
     }
+
+    /// Determines if the entry is a section data entry.
+    #[inline]
+    pub fn is_section_data(&self) -> bool {
+        matches!(self, Entry::SectionData(_))
+    }
 }
 
 impl SizedEntry for Entry {
-    fn physical_size(entry: &Self, builder: &LayoutBuilder<Self>) -> u64 {
+    fn physical_size(entry: &Self, ctx: &Context<'_, Self>) -> u64 {
         match entry {
             Entry::FileHeader => {
-                if builder.target.is_64bit() {
+                if ctx.target.is_64bit() {
                     size_of::<macho::MachHeader64<NE>>() as u64
                 } else {
                     size_of::<macho::MachHeader32<NE>>() as u64
                 }
             }
             Entry::PageZero | Entry::LinkEdit => {
-                if builder.target.is_64bit() {
+                if ctx.target.is_64bit() {
                     size_of::<macho::SegmentCommand64<NE>>() as u64
                 } else {
                     size_of::<macho::SegmentCommand32<NE>>() as u64
                 }
             }
-            Entry::SegmentHeader { sections, .. } => {
-                let segment_size = if builder.target.is_64bit() {
+            Entry::SegmentHeader(segment_content) => {
+                let segment_size = if ctx.target.is_64bit() {
                     size_of::<macho::SegmentCommand64<NE>>() as u64
                 } else {
                     size_of::<macho::SegmentCommand32<NE>>() as u64
                 };
 
-                let section_size = if builder.target.is_64bit() {
+                let section_size = if ctx.target.is_64bit() {
                     size_of::<macho::Section64<NE>>() as u64
                 } else {
                     size_of::<macho::Section32<NE>>() as u64
                 };
 
-                segment_size + section_size * sections.len() as u64
+                segment_size + section_size * segment_content.sections.len() as u64
             }
-            Entry::SectionData(section_id) => builder.size_of_section(*section_id),
+            Entry::SectionData(section_id) => ctx.db.size_of_section(*section_id),
             Entry::SymbolTable => {
-                let nsyms = builder.index.symbols.len() as u64;
+                let nsyms = ctx.index.symbols.len() as u64;
                 nsyms * size_of::<macho::Nlist64<NE>>() as u64
             }
             Entry::StringTable => {
                 // First entry is a single space, used as a null string
                 let mut strsize = 2_u64;
 
-                for symbol_name in builder.index.symbols.keys() {
+                for symbol_name in ctx.index.symbols.keys() {
                     strsize += symbol_name.len() as u64 + 1;
                 }
 
-                for symbol_name in builder.index.dynamic_symbols.keys() {
+                for symbol_name in ctx.index.dynamic_symbols.keys() {
                     strsize += symbol_name.len() as u64 + 1;
                 }
 
                 strsize
             }
-            Entry::DylibHeader(lib_id) => {
-                let library = builder.db.library(*lib_id);
-
+            Entry::DylibHeader(_library_id, library_name) => {
                 let mut dylib_size = 0;
                 dylib_size += size_of::<macho::DylibCommand<NE>>() as u64;
-                dylib_size += library.path.display().to_string().len() as u64 + 1;
+                dylib_size += library_name.len() as u64 + 1;
                 dylib_size = align_to(dylib_size, align_of::<u64>() as u64);
 
                 dylib_size
             }
-            Entry::SymbolTableHeader => size_of::<macho::SymtabCommand<NE>>() as u64,
-            Entry::DynamicSymbolTableHeader => size_of::<macho::DysymtabCommand<NE>>() as u64,
+            Entry::SymtabHeader => size_of::<macho::SymtabCommand<NE>>() as u64,
+            Entry::DysymtabHeader => size_of::<macho::DysymtabCommand<NE>>() as u64,
             Entry::Entrypoint => size_of::<macho::EntryPointCommand<NE>>() as u64,
             Entry::LoadDylinker => {
                 let mut dylinker_size = size_of::<macho::DylinkerCommand<NE>>() as u64;
@@ -168,227 +211,214 @@ impl SizedEntry for Entry {
             Entry::Uuid => size_of::<macho::UuidCommand<NE>>() as u64,
             Entry::BuildVersion => size_of::<macho::BuildVersionCommand<NE>>() as u64,
             Entry::SourceVersion => size_of::<macho::SourceVersionCommand<NE>>() as u64,
+            Entry::Padding(size) => *size,
         }
     }
 
-    fn alignment(entry: &Self, builder: &LayoutBuilder<Self>) -> u64 {
+    fn alignment(entry: &Self, ctx: &Context<'_, Self>) -> u64 {
         match entry {
             Entry::FileHeader
             | Entry::PageZero
-            | Entry::SegmentHeader { .. }
-            | Entry::DylibHeader(_)
-            | Entry::SymbolTableHeader
-            | Entry::DynamicSymbolTableHeader
+            | Entry::SegmentHeader(_)
+            | Entry::DylibHeader(_, _)
+            | Entry::SymtabHeader
+            | Entry::DysymtabHeader
             | Entry::Entrypoint
             | Entry::LoadDylinker
             | Entry::Uuid
             | Entry::BuildVersion
-            | Entry::SourceVersion => 1,
+            | Entry::SourceVersion
+            | Entry::Padding(_) => 1,
             Entry::LinkEdit | Entry::StringTable | Entry::SymbolTable => 4,
-            Entry::SectionData(section_id) => builder.db.output_section(*section_id).alignment as u64,
+            Entry::SectionData(section_id) => ctx.db.output_section(*section_id).alignment as u64,
         }
     }
 }
 
 impl EntryDisplay for Entry {
-    fn fmt(&self, builder: &Layout<Entry>, w: &mut dyn std::fmt::Write) -> std::fmt::Result {
+    fn fmt(&self, ctx: &Context<'_, Entry>, w: &mut dyn std::fmt::Write) -> std::fmt::Result {
         match self {
             Self::FileHeader => write!(w, "FileHeader"),
             Self::PageZero => write!(w, "PageZero"),
-            Self::SegmentHeader { segment_name, .. } => write!(w, "SegmentHeader, {segment_name}"),
+            Self::SegmentHeader(segment) => write!(w, "SegmentHeader, {}", segment.name),
             Self::LinkEdit => write!(w, "Linkedit"),
             Self::SectionData(section_id) => {
-                write!(w, "SectionData, {}", builder.db.output_section(*section_id).name)
+                write!(w, "SectionData, {}", ctx.db.output_section(*section_id).name)
             }
             Self::SymbolTable => write!(w, "SymbolTable"),
             Self::StringTable => write!(w, "StringTable"),
-            Self::DylibHeader(library_id) => {
-                write!(w, "DylibHeader, {}", builder.db.library(*library_id).path.display())
+            Self::DylibHeader(_library_id, library_name) => {
+                write!(w, "DylibHeader, {library_name}")
             }
-            Self::SymbolTableHeader => write!(w, "SymbolTableHeader"),
-            Self::DynamicSymbolTableHeader => write!(w, "DynamicSymbolTableHeader"),
+            Self::SymtabHeader => write!(w, "SymtabHeader"),
+            Self::DysymtabHeader => write!(w, "DysymtabHeader"),
             Self::Entrypoint => write!(w, "Entrypoint"),
             Self::LoadDylinker => write!(w, "LoadDylinker"),
             Self::Uuid => write!(w, "Uuid"),
             Self::BuildVersion => write!(w, "BuildVersion"),
             Self::SourceVersion => write!(w, "SourceVersion"),
+            Self::Padding(size) => write!(w, "Padding(0x{size:04X})"),
         }
     }
 }
 
-struct Builder<'db> {
-    target: Target,
-    layout: Layout<'db, Entry>,
+#[derive(Debug, Clone)]
+#[derive_where::derive_where(Hash, PartialEq, Eq)]
+pub(crate) struct SegmentContent {
+    pub name: Interned<String>,
 
-    /// Defines the virtual placements for each entry within the layout.
-    virtual_places: IndexMap<Entry, Placement>,
+    #[derive_where(skip)]
+    pub sections: Vec<OutputSectionId>,
 
-    string_table: IndexMap<String, usize>,
+    /// Sum of all contained section's data size without any additional padding.
+    #[derive_where(skip)]
+    pub data_size: u64,
+
+    /// Sum of all contained section's data size, aligned to the required
+    /// size alignment.
+    #[derive_where(skip)]
+    pub total_size: u64,
 }
 
-impl<'db> Builder<'db> {
-    pub fn new(layout: Layout<'db, Entry>) -> Self {
-        Builder {
-            target: layout.target,
-            layout,
-            virtual_places: IndexMap::new(),
-            string_table: IndexMap::new(),
-        }
-    }
-
-    #[inline]
-    fn magic_number(&self) -> u32 {
-        if self.target.is_64bit() {
-            macho::MH_MAGIC_64
-        } else {
-            macho::MH_MAGIC
-        }
-    }
-
-    #[inline]
-    fn cpu_type(&self) -> u32 {
-        let cpu_type = if self.target.is_arm() {
-            macho::CPU_TYPE_ARM
-        } else if self.target.is_x86() {
-            macho::CPU_TYPE_X86
-        } else {
-            macho::CPU_TYPE_ANY
-        };
-
-        if self.target.is_64bit() {
-            cpu_type | macho::CPU_ARCH_ABI64
-        } else {
-            cpu_type | macho::CPU_ARCH_ABI64_32
-        }
-    }
-
-    #[inline]
-    fn cpu_subtype(&self) -> u32 {
-        match self.target.arch {
-            Architecture::Arm | Architecture::Arm64 => macho::CPU_SUBTYPE_ARM_ALL,
-            Architecture::X86 | Architecture::X86_64 => macho::CPU_SUBTYPE_X86_ALL,
-        }
-    }
-
-    /// Gets the size of a segment load command, in bytes.
-    #[inline]
-    fn segment_hdr_size(&self) -> u64 {
-        if self.target.is_64bit() {
-            size_of::<macho::SegmentCommand64<NE>>() as u64
-        } else {
-            size_of::<macho::SegmentCommand32<NE>>() as u64
-        }
-    }
-
-    /// Gets the size of a section header, in bytes.
-    #[inline]
-    fn section_hdr_size(&self) -> u64 {
-        if self.target.is_64bit() {
-            size_of::<macho::Section64<NE>>() as u64
-        } else {
-            size_of::<macho::Section32<NE>>() as u64
-        }
-    }
-
-    /// Gets the amount of load commands in the Mach-O file.
-    pub fn lc_count(&self) -> u32 {
-        let count = self
-            .layout
-            .entries()
-            .filter_map(|(entry, _meta)| entry.is_load_command().then_some(entry))
-            .count();
-
-        u32::try_from(count).unwrap()
-    }
-
-    /// Gets the size of load commands in the Mach-O file, in bytes.
-    pub fn lc_size(&self) -> u32 {
-        let size = self
-            .layout
-            .entries()
-            .filter_map(|(entry, meta)| {
-                // Note: should also include the size of child headers as well, such as
-                //       section headers which are children of segment headers.
-
-                if entry.is_load_command() {
-                    Some(meta.physical_size)
-                } else {
-                    None
-                }
-            })
-            .sum::<u64>();
-
-        u32::try_from(size).unwrap()
-    }
-
-    /// Gets the virtual size of the given entry when loaded into memory.
-    fn vmsize_of_entry(&self, entry: &Entry) -> u64 {
-        self.virtual_places.get(entry).unwrap().size
-    }
-
-    /// Gets the virtual offset of the given entry when loaded into memory.
-    fn vmaddr_of_entry(&self, entry: &Entry) -> u64 {
-        self.virtual_places.get(entry).unwrap().offset
-    }
-
-    /// Gets the file offset of the symbol with the given ID.
-    ///
-    /// If the symbol with the given ID has no parent section, this method
-    /// returns [`None`].
-    fn offset_of_symbol(&self, id: SymbolId) -> Option<u64> {
-        let symbol = self.layout.db.symbol(id).unwrap();
-        let section_id = symbol.section?;
-
-        let SymbolAddress::Relative(relative_address) = symbol.address else {
-            return None;
-        };
-
-        let (merged_section, nested_idx) = self.layout.input_section_of(section_id);
-        let mut parent_section_offset = self.layout.offset_of_entry(&Entry::SectionData(merged_section.id));
-
-        for contained_section_id in merged_section.merged_from.iter().take(nested_idx) {
-            let contained_section = self.layout.db.input_section(*contained_section_id);
-            parent_section_offset += contained_section.data.len() as u64;
-        }
-
-        Some(parent_section_offset + relative_address)
-    }
-
-    /// Gets the virtual address of the symbol with the given ID when loaded
-    /// into memory.
-    fn vmaddr_of_symbol(&self, id: SymbolId) -> u64 {
-        let symbol = self.layout.db.symbol(id).unwrap();
-
-        match symbol.address {
-            SymbolAddress::Unknown | SymbolAddress::Undefined => 0,
-            SymbolAddress::Absolute(addr) => addr,
-            SymbolAddress::Relative(section_offset) => {
-                let Some(section_id) = symbol.section else {
-                    unreachable!("relative symbols must have parent section");
-                };
-
-                self.vmaddr_of_unmerged_section(section_id) + section_offset
-            }
-        }
-    }
-
-    /// Gets the virtual address of the unmerged section with the given ID when
-    /// loaded into memory.
-    fn vmaddr_of_unmerged_section(&self, id: InputSectionId) -> u64 {
-        let (merged_section, nested_idx) = self.layout.input_section_of(id);
-        let segment_header_entry = Entry::SegmentHeader {
-            segment_name: merged_section.name.segment.clone().unwrap().intern(),
+impl SegmentContent {
+    pub fn new(name: Interned<String>) -> Self {
+        SegmentContent {
+            name,
             sections: Vec::new(),
+            data_size: 0,
+            total_size: 0,
+        }
+    }
+
+    pub fn is_text(&self) -> bool {
+        self.name.as_str() == macho::SEG_TEXT
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StringTable {
+    /// Map of all strings in the table, mapped to their offset in the table.
+    pub strings: IndexMap<Interned<String>, u64>,
+
+    /// Total size of the string table, in bytes.
+    pub total_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SymbolTable {
+    pub symbols: Vec<Symbol>,
+
+    /// Total size of the symbol table, in bytes.
+    pub total_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Symbol {
+    pub id: SymbolId,
+    pub name: Interned<String>,
+    pub ntype: u8,
+    pub ndesc: u16,
+    pub nsect: u8,
+}
+
+fn merge_strings(ctx: &Context<'_, Entry>) -> StringTable {
+    let string_capacity = 1 + ctx.index.symbols.len() + ctx.index.dynamic_symbols.len();
+
+    let mut strings = IndexMap::with_capacity(string_capacity);
+    let mut total_size = 0;
+
+    // First entry is a single space, used as a null string
+    strings.insert(String::from(" ").intern(), 0);
+    total_size += 2;
+
+    for symbol_name in ctx.index.symbols.keys() {
+        strings.insert(symbol_name.intern(), total_size);
+        total_size += symbol_name.len() as u64 + 1;
+    }
+
+    for symbol_name in ctx.index.dynamic_symbols.keys() {
+        strings.insert(symbol_name.intern(), total_size);
+        total_size += symbol_name.len() as u64 + 1;
+    }
+
+    StringTable { strings, total_size }
+}
+
+/// Sorts the given iterator of symbols, depending on their linkage.
+///
+/// The symbol table in Mach-O expects the symbols to appear in a certain order:
+/// - local debug symbols,
+/// - private symbols,
+/// - external symbols,
+/// - undefined symbols
+fn sort_symbols<I>(ctx: &Context<'_, Entry>, symbols: I) -> Vec<SymbolId>
+where
+    I: Iterator<Item = SymbolId>,
+{
+    let mut sorted_symbols: Vec<_> = symbols.collect();
+
+    sorted_symbols.sort_by_key(|&sym_id| {
+        let linkage = ctx.db.symbol(sym_id).unwrap().linkage;
+
+        match linkage {
+            Linkage::Local => 0,
+            Linkage::Global => 1,
+            Linkage::External => 2,
+        }
+    });
+
+    sorted_symbols
+}
+
+fn define_symbols(ctx: &Context<'_, Entry>) -> SymbolTable {
+    let sorted_symbols = sort_symbols(ctx, ctx.index.symbols.values().copied());
+
+    let nlist_size = if ctx.target.is_64bit() {
+        size_of::<macho::Nlist64<NE>>() as u64
+    } else {
+        size_of::<macho::Nlist32<NE>>() as u64
+    };
+
+    let mut symbols = Vec::with_capacity(ctx.index.symbols.len());
+    let mut total_size = 0;
+
+    for symbol_id in sorted_symbols {
+        let symbol = ctx.db.symbol(symbol_id).unwrap();
+
+        let ntype = match symbol.linkage {
+            crate::Linkage::External => macho::N_UNDF | macho::N_EXT,
+            crate::Linkage::Global => macho::N_SECT | macho::N_EXT,
+            crate::Linkage::Local => macho::N_SECT,
         };
 
-        let merged_vaddr = self.vmaddr_of_entry(&segment_header_entry);
-        let mut section_vaddr = merged_vaddr;
+        let nsect = symbol
+            .section
+            .and_then(|id| {
+                for (idx, merged_section) in ctx.db.output_sections().enumerate() {
+                    if merged_section.merged_from.contains(&id) {
+                        return Some(u8::try_from(idx).unwrap() + 1);
+                    }
+                }
 
-        for contained_section_id in merged_section.merged_from.iter().take(nested_idx) {
-            let contained_section = self.layout.db.input_section(*contained_section_id);
-            section_vaddr += contained_section.data.len() as u64;
-        }
+                None
+            })
+            .unwrap_or(0);
 
-        section_vaddr
+        let ndesc = match symbol.linkage {
+            crate::Linkage::External => macho::REFERENCE_FLAG_UNDEFINED_NON_LAZY,
+            crate::Linkage::Global | crate::Linkage::Local => macho::REFERENCE_FLAG_DEFINED,
+        };
+
+        symbols.push(Symbol {
+            id: symbol.id,
+            name: symbol.name.intern(),
+            ntype,
+            ndesc,
+            nsect,
+        });
+
+        total_size += nlist_size;
     }
+
+    SymbolTable { symbols, total_size }
 }

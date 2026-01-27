@@ -1,56 +1,17 @@
-use indexmap::{IndexMap, IndexSet};
-use lume_errors::{Result, SimpleDiagnostic};
-use lume_span::Interned;
+use indexmap::IndexMap;
+use lume_errors::Result;
 use object::{NativeEndian as NE, macho};
 
 use crate::common::*;
-use crate::macho::{Builder, DYLINKER_NAME, Entry};
+use crate::macho::layout::Layout;
+use crate::macho::{DYLINKER_NAME, Entry, SegmentContent};
 use crate::write::Writer;
-use crate::{DEFAULT_ENTRY, Layout, LayoutBuilder, align_to};
+use crate::{align_to, page_align};
 
-pub(crate) fn declare_layout(builder: &mut LayoutBuilder<Entry>) {
-    builder.declare_entry(Entry::FileHeader);
-    builder.declare_entry(Entry::PageZero);
-
-    let segments: Vec<_> = builder.segments().collect();
-
-    for segment_name in segments {
-        builder.declare_entry(Entry::SegmentHeader {
-            segment_name,
-            sections: builder.db.sections_in_segment(&segment_name).collect(),
-        });
-    }
-
-    builder.declare_entry(Entry::LinkEdit);
-    builder.declare_entry(Entry::SymbolTableHeader);
-    builder.declare_entry(Entry::DynamicSymbolTableHeader);
-    builder.declare_entry(Entry::LoadDylinker);
-    builder.declare_entry(Entry::Uuid);
-    builder.declare_entry(Entry::BuildVersion);
-    builder.declare_entry(Entry::SourceVersion);
-
-    for library_id in builder.required_library_ids() {
-        builder.declare_entry(Entry::DylibHeader(library_id));
-    }
-
-    builder.declare_entry(Entry::Entrypoint);
-
-    let section_ids: Vec<_> = builder.db.output_sections().map(|sec| sec.id).collect();
-
-    for section_id in section_ids.iter().copied() {
-        builder.declare_entry(Entry::SectionData(section_id));
-    }
-
-    builder.declare_entry(Entry::StringTable);
-    builder.declare_entry(Entry::SymbolTable);
-}
-
-pub(crate) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<Entry>) -> Result<()> {
-    let mut builder = Builder::new(layout);
-
-    builder.virtual_places = layout_virtual_places(&builder, |entry| match &entry {
+pub(crate) fn emit_to<W: Writer>(writer: &mut W, mut layout: Layout<'_>) -> Result<()> {
+    layout.virtual_places = layout_virtual_places(&layout, |entry| match &entry {
         Entry::PageZero => {
-            if builder.target.is_64bit() {
+            if layout.target().is_64bit() {
                 super::PAGE_ZERO_SIZE_64
             } else {
                 super::PAGE_ZERO_SIZE_32
@@ -59,65 +20,48 @@ pub(crate) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<Entry>) -> R
 
         // The `__LINKEDIT` segment currently contains the string table and the symbol table.
         Entry::LinkEdit => {
-            let vbase = builder.layout.offset_of_entry(&Entry::StringTable);
+            let vbase = layout.ctx.offset_of_entry(&Entry::StringTable);
 
-            let symtab_offset = builder.layout.offset_of_entry(&Entry::SymbolTable);
-            let symtab_size = builder.layout.size_of_entry(&Entry::SymbolTable);
+            let symtab_offset = layout.ctx.offset_of_entry(&Entry::SymbolTable);
+            let symtab_size = layout.ctx.size_of_entry(&Entry::SymbolTable);
             let vend = symtab_offset + symtab_size;
 
-            vend - vbase
+            page_align(vend - vbase)
         }
 
-        Entry::SegmentHeader { segment_name, sections } => {
-            match segment_name.as_str() {
-                // The __TEXT segment needs to hold the entire MachO file metadata within it to
-                // be mapped correctly.
-                //
-                // Since sections are ordered by address, we get the offset of the first byte in
-                // the first section, which gets us the size of all MachO file metadata within
-                // the file.
-                macho::SEG_TEXT => {
-                    let first_section_id = builder.layout.db.output_sections().next().unwrap().id;
+        Entry::SegmentHeader(segment_content) => layout.aligned_segment_size(&segment_content.name),
 
-                    builder.layout.offset_of_entry(&Entry::SectionData(first_section_id))
-                }
-
-                _ => sections
-                    .iter()
-                    .map(|&section_id| builder.layout.size_of_entry(&Entry::SectionData(section_id)))
-                    .sum::<u64>(),
-            }
-        }
         _ => 0,
     });
 
-    builder.apply_relocations();
+    layout.apply_relocations();
 
-    for (entry, metadata) in builder.layout.clone_entries() {
-        let alignment = builder.layout.alignment_of_entry(&entry);
-        writer.align_to(usize::try_from(alignment).unwrap())?;
+    for (entry, metadata) in layout.ctx.clone_entries() {
+        let alignment = layout.ctx.alignment_of_entry(&entry);
+        writer.align_to(alignment)?;
 
         let current_length = writer.len();
 
-        let entry_offset = builder.layout.offset_of_entry(&entry);
+        let entry_offset = layout.ctx.offset_of_entry(&entry);
         assert_eq!(entry_offset, current_length as u64);
 
         match &entry {
-            Entry::FileHeader => write_file_header(&builder, writer)?,
-            Entry::PageZero => write_page_zero(&builder, writer)?,
-            Entry::SegmentHeader { segment_name, .. } => write_segment_header(&builder, &entry, *segment_name, writer)?,
-            Entry::LinkEdit => write_linkedit(&builder, writer)?,
-            Entry::SymbolTableHeader => write_symtab_header(&builder, writer)?,
-            Entry::DynamicSymbolTableHeader => write_dysymtab_header(&builder, writer)?,
-            Entry::DylibHeader(lib_id) => write_dylib_header(&builder, *lib_id, writer)?,
-            Entry::SectionData(section_id) => write_section_data(&builder, *section_id, writer)?,
-            Entry::StringTable => write_string_table(&mut builder, writer)?,
-            Entry::SymbolTable => write_symbol_table(&builder, writer)?,
-            Entry::Entrypoint => write_entrypoint(&builder, writer)?,
+            Entry::FileHeader => write_file_header(&layout, writer)?,
+            Entry::PageZero => write_page_zero(&layout, writer)?,
+            Entry::SegmentHeader(segment) => write_segment_header(&layout, &entry, segment, writer)?,
+            Entry::LinkEdit => write_linkedit(&layout, writer)?,
+            Entry::SymtabHeader => write_symtab_header(&layout, writer)?,
+            Entry::DysymtabHeader => write_dysymtab_header(&layout, writer)?,
+            Entry::DylibHeader(lib_id, _lib_name) => write_dylib_header(&layout, *lib_id, writer)?,
+            Entry::SectionData(section_id) => write_section_data(&layout, *section_id, writer)?,
+            Entry::StringTable => write_string_table(&layout, writer)?,
+            Entry::SymbolTable => write_symbol_table(&layout, writer)?,
+            Entry::Entrypoint => write_entrypoint(&layout, writer)?,
             Entry::LoadDylinker => write_dylinker(writer)?,
-            Entry::Uuid => write_uuid(&builder, writer)?,
+            Entry::Uuid => write_uuid(&layout, writer)?,
             Entry::BuildVersion => write_build_version(writer)?,
             Entry::SourceVersion => write_source_version(writer)?,
+            Entry::Padding(size) => writer.write(&vec![0x00; usize::try_from(*size).unwrap()])?,
         }
 
         let written_bytes = writer.len() - current_length;
@@ -137,11 +81,11 @@ pub(crate) fn emit_layout<W: Writer>(writer: &mut W, layout: Layout<Entry>) -> R
 /// For each entry, the given closure is invoked to return the virtual size of
 /// the entry. The virtual address of all subsequent entries is set to the sum
 /// of all previous entry sizes.
-fn layout_virtual_places<F: Fn(&Entry) -> u64>(builder: &Builder, f: F) -> IndexMap<Entry, Placement> {
+fn layout_virtual_places<F: Fn(&Entry) -> u64>(layout: &Layout<'_>, f: F) -> IndexMap<Entry, Placement> {
     let mut vmaddr = 0;
-    let mut entries = IndexMap::with_capacity(builder.layout.entries.len());
+    let mut entries = IndexMap::with_capacity(layout.ctx.entries().len());
 
-    for (entry, _metadata) in builder.layout.clone_entries() {
+    for (entry, _metadata) in layout.ctx.clone_entries() {
         let vmsize = f(&entry);
 
         entries.insert(entry, Placement {
@@ -155,55 +99,29 @@ fn layout_virtual_places<F: Fn(&Entry) -> u64>(builder: &Builder, f: F) -> Index
     entries
 }
 
-/// Sorts the given iterator of symbols, depending on their linkage.
-///
-/// The symbol table in Mach-O expects the symbols to appear in a certain order:
-/// - local debug symbols,
-/// - private symbols,
-/// - external symbols,
-/// - undefined symbols
-fn sort_symbols<I>(builder: &Builder, symbols: I) -> Vec<SymbolId>
-where
-    I: Iterator<Item = SymbolId>,
-{
-    let mut sorted_symbols: Vec<_> = symbols.collect();
-
-    sorted_symbols.sort_by_key(|&sym_id| {
-        let linkage = builder.layout.db.symbol(sym_id).unwrap().linkage;
-
-        match linkage {
-            Linkage::Local => 0,
-            Linkage::Global => 1,
-            Linkage::External => 2,
-        }
-    });
-
-    sorted_symbols
-}
-
-fn write_file_header<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
-    writer.write_u32(builder.magic_number())?;
-    writer.write_u32(builder.cpu_type())?;
-    writer.write_u32(builder.cpu_subtype())?;
+fn write_file_header<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result<()> {
+    writer.write_u32(layout.magic_number())?;
+    writer.write_u32(layout.cpu_type())?;
+    writer.write_u32(layout.cpu_subtype())?;
 
     writer.write_u32(macho::MH_EXECUTE)?;
 
-    writer.write_u32(builder.lc_count())?;
-    writer.write_u32(builder.lc_size())?;
+    writer.write_u32(layout.lc_count())?;
+    writer.write_u32(layout.lc_size())?;
 
     let flags = macho::MH_DYLDLINK | macho::MH_PIE | macho::MH_NOUNDEFS;
     writer.write_u32(flags)?;
 
-    if builder.target.is_64bit() {
+    if layout.target().is_64bit() {
         writer.write_u32(0)?; // reserved (64-bit only)
     }
 
     Ok(())
 }
 
-fn write_page_zero<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
-    let lc_size = builder.layout.size_of_entry(&Entry::PageZero);
-    let vmsize = builder.vmsize_of_entry(&Entry::PageZero);
+fn write_page_zero<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result<()> {
+    let lc_size = layout.ctx.size_of_entry(&Entry::PageZero);
+    let vmsize = layout.vmsize_of_entry(&Entry::PageZero);
 
     writer.write_u32(macho::LC_SEGMENT_64)?;
     writer.write_u32(u32::try_from(lc_size).unwrap())?;
@@ -228,44 +146,29 @@ fn write_page_zero<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
 }
 
 fn write_segment_header<W: Writer>(
-    builder: &Builder,
+    layout: &Layout<'_>,
     entry: &Entry,
-    segment_name: Interned<String>,
+    segment: &SegmentContent,
     writer: &mut W,
 ) -> Result<()> {
-    let segment_str: &str = segment_name.as_ref();
-    let sections = builder.layout.db.sections_in_segment(segment_str).collect::<Vec<_>>();
+    let lc_size = layout.ctx.size_of_entry(entry);
 
-    // Add the size of the segment header itself along with all section
-    // headers within it.
-    let section_header_size = sections.len() as u64 * builder.section_hdr_size();
-    let lc_size = builder.segment_hdr_size() + section_header_size;
+    let seg_vmaddr = layout.vmaddr_of_entry(entry);
+    let seg_vmsize = layout.vmsize_of_entry(entry);
 
-    let seg_vmaddr = builder.vmaddr_of_entry(entry);
-    let seg_vmsize = builder.vmsize_of_entry(entry);
-
-    let (fileoff, filesize) = if segment_str == macho::SEG_TEXT {
-        let first_section_id = builder.layout.db.output_sections().next().unwrap().id;
-        let metadata_size = builder.layout.offset_of_entry(&Entry::SectionData(first_section_id));
-
-        (0, metadata_size)
+    let fileoff = if segment.is_text() {
+        0
     } else {
-        let fileoff = sections.first().map_or(0, |&section| {
-            builder.layout.offset_of_entry(&Entry::SectionData(section))
-        });
-
-        let filesize = sections
-            .iter()
-            .map(|&section_id| builder.layout.size_of_entry(&Entry::SectionData(section_id)))
-            .sum::<u64>();
-
-        (fileoff, filesize)
+        segment
+            .sections
+            .first()
+            .map_or(0, |&section| layout.ctx.offset_of_entry(&Entry::SectionData(section)))
     };
 
     writer.write_u32(macho::LC_SEGMENT_64)?;
     writer.write_u32(u32::try_from(lc_size).unwrap())?;
 
-    let mut segment_name_bytes = segment_name.as_bytes().to_vec();
+    let mut segment_name_bytes = segment.name.as_bytes().to_vec();
     segment_name_bytes.resize(16, 0);
     writer.write(&segment_name_bytes)?;
 
@@ -273,9 +176,9 @@ fn write_segment_header<W: Writer>(
     writer.write_u64(seg_vmsize)?;
 
     writer.write_u64(fileoff)?;
-    writer.write_u64(filesize)?;
+    writer.write_u64(seg_vmsize)?;
 
-    let section_prot = match segment_str {
+    let section_prot = match segment.name.as_str() {
         macho::SEG_TEXT => macho::VM_PROT_READ | macho::VM_PROT_EXECUTE,
         macho::SEG_DATA => macho::VM_PROT_READ | macho::VM_PROT_WRITE,
         _ => macho::VM_PROT_READ,
@@ -284,14 +187,12 @@ fn write_segment_header<W: Writer>(
     writer.write_u32(section_prot)?; // maxprot
     writer.write_u32(section_prot)?; // initprot
 
-    writer.write_u32(u32::try_from(sections.len()).unwrap())?; // nsects
+    writer.write_u32(u32::try_from(segment.sections.len()).unwrap())?; // nsects
     writer.write_u32(0x00)?; // flags
 
-    let mut section_offset = 0;
-
-    for section_id in sections {
+    for &section_id in &segment.sections {
         let data_entry = Entry::SectionData(section_id);
-        let section = builder.layout.db.output_section(section_id);
+        let section = layout.ctx.db.output_section(section_id);
 
         let mut section_name_bytes = section.name.section.as_bytes().to_vec();
         section_name_bytes.resize(16, 0);
@@ -299,9 +200,9 @@ fn write_segment_header<W: Writer>(
 
         writer.write(&segment_name_bytes)?;
 
-        let sec_vmaddr = seg_vmaddr + section_offset;
-        let sec_vmsize = builder.layout.size_of_entry(&data_entry);
-        let offset = builder.layout.offset_of_entry(&data_entry);
+        let sec_vmaddr = layout.vmaddr_of_section_data(segment, section_id);
+        let sec_vmsize = layout.ctx.size_of_entry(&data_entry);
+        let offset = layout.ctx.offset_of_entry(&data_entry);
 
         writer.write_u64(sec_vmaddr)?; // addr
         writer.write_u64(sec_vmsize)?; // size
@@ -326,19 +227,17 @@ fn write_segment_header<W: Writer>(
         writer.write_u32(0)?; // reserved1
         writer.write_u32(0)?; // reserved2
         writer.write_u32(0)?; // reserved3
-
-        section_offset += sec_vmsize;
     }
 
     Ok(())
 }
 
-fn write_linkedit<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
-    let lc_size = builder.layout.size_of_entry(&Entry::LinkEdit);
+fn write_linkedit<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result<()> {
+    let lc_size = layout.ctx.size_of_entry(&Entry::LinkEdit);
 
-    let vmaddr = builder.vmaddr_of_entry(&Entry::LinkEdit);
-    let vmsize = builder.vmsize_of_entry(&Entry::LinkEdit);
-    let fileoff = builder.layout.offset_of_entry(&Entry::StringTable);
+    let vmaddr = layout.vmaddr_of_entry(&Entry::LinkEdit);
+    let vmsize = layout.vmsize_of_entry(&Entry::LinkEdit);
+    let fileoff = layout.ctx.offset_of_entry(&Entry::StringTable);
 
     writer.write_u32(macho::LC_SEGMENT_64)?;
     writer.write_u32(u32::try_from(lc_size).unwrap())?;
@@ -362,14 +261,14 @@ fn write_linkedit<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
     Ok(())
 }
 
-fn write_symtab_header<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
+fn write_symtab_header<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result<()> {
     let lc_size = size_of::<macho::SymtabCommand<NE>>();
 
-    let symoff = builder.layout.offset_of_entry(&Entry::SymbolTable);
-    let nsyms = builder.layout.index.symbols.len();
+    let symoff = layout.ctx.offset_of_entry(&Entry::SymbolTable);
+    let nsyms = layout.ctx.index.symbols.len();
 
-    let stroff = builder.layout.offset_of_entry(&Entry::StringTable);
-    let strsize = builder.layout.size_of_entry(&Entry::StringTable);
+    let stroff = layout.ctx.offset_of_entry(&Entry::StringTable);
+    let strsize = layout.ctx.size_of_entry(&Entry::StringTable);
 
     writer.write_u32(macho::LC_SYMTAB)?;
     writer.write_u32(u32::try_from(lc_size).unwrap())?;
@@ -383,14 +282,12 @@ fn write_symtab_header<W: Writer>(builder: &Builder, writer: &mut W) -> Result<(
     Ok(())
 }
 
-fn write_dysymtab_header<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
-    let sorted_symbols = sort_symbols(builder, builder.layout.index.symbols.values().copied());
-
+fn write_dysymtab_header<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result<()> {
     let mut local_sym_len = 0_u32;
     let mut ext_sym_len = 0_u32;
 
-    for symbol_id in sorted_symbols.iter().copied() {
-        let linkage = builder.layout.db.symbol(symbol_id).unwrap().linkage;
+    for symbol in &layout.symbol_table.symbols {
+        let linkage = layout.ctx.db.symbol(symbol.id).unwrap().linkage;
 
         match linkage {
             Linkage::Local | Linkage::Global => {
@@ -437,8 +334,8 @@ fn write_dysymtab_header<W: Writer>(builder: &Builder, writer: &mut W) -> Result
     Ok(())
 }
 
-fn write_dylib_header<W: Writer>(builder: &Builder, library_id: LibraryId, writer: &mut W) -> Result<()> {
-    let library = builder.layout.db.library(library_id);
+fn write_dylib_header<W: Writer>(layout: &Layout<'_>, library_id: LibraryId, writer: &mut W) -> Result<()> {
+    let library = layout.ctx.db.library(library_id);
     let library_path = library.path.display().to_string();
 
     let name_size = library_path.len() + 1;
@@ -460,94 +357,53 @@ fn write_dylib_header<W: Writer>(builder: &Builder, library_id: LibraryId, write
 
     // `otool` claims the `dylib` commands must be padded to a multiple of 4 bytes,
     // while `nm` requires padding to a multiple of 8 bytes.
-    writer.align_to(align_of::<u64>())?;
+    writer.align_to(align_of::<u64>() as u64)?;
 
     Ok(())
 }
 
-fn write_section_data<W: Writer>(builder: &Builder, id: OutputSectionId, writer: &mut W) -> Result<()> {
-    let section = builder.layout.db.output_section(id);
+fn write_section_data<W: Writer>(layout: &Layout<'_>, id: OutputSectionId, writer: &mut W) -> Result<()> {
+    let section = layout.ctx.db.output_section(id);
 
     for &contained_section_id in &section.merged_from {
-        let contained_section = builder.layout.db.input_section(contained_section_id);
+        let contained_section = layout.ctx.db.input_section(contained_section_id);
         writer.write(&contained_section.data)?;
     }
 
     Ok(())
 }
 
-fn write_string_table<W: Writer>(builder: &mut Builder, writer: &mut W) -> Result<()> {
-    let strtab_base = writer.len();
-
-    let string_capacity = 1 + builder.layout.index.symbols.len() + builder.layout.index.dynamic_symbols.len();
-    let mut strings = IndexSet::with_capacity(string_capacity);
-
-    // First entry is a single space, used as a null string
-    strings.insert(String::from(" "));
-
-    for symbol_name in builder.layout.index.symbols.keys() {
-        strings.insert(symbol_name.clone());
-    }
-
-    for symbol_name in builder.layout.index.dynamic_symbols.keys() {
-        strings.insert(symbol_name.clone());
-    }
-
-    for symbol_name in strings {
-        let offset = writer.len() - strtab_base;
-
+fn write_string_table<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result<()> {
+    for (symbol_name, _symbol_offset) in &layout.string_table.strings {
         writer.write(symbol_name.as_bytes())?;
         writer.write(&[0])?;
-
-        builder.string_table.insert(symbol_name, offset);
     }
 
     Ok(())
 }
 
-fn write_symbol_table<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
-    let sorted_symbols = sort_symbols(builder, builder.layout.index.symbols.values().copied());
-
-    for symbol_id in sorted_symbols {
-        let symbol = builder.layout.db.symbol(symbol_id).unwrap();
-        let nstrx = *builder.string_table.get(&symbol.name).unwrap();
-
-        let n_type = match symbol.linkage {
-            crate::Linkage::External => macho::N_UNDF | macho::N_EXT,
-            crate::Linkage::Global => macho::N_SECT | macho::N_EXT,
-            crate::Linkage::Local => macho::N_SECT,
-        };
-
-        let section_idx = symbol.section.and_then(|id| section_idx_of(builder, id)).unwrap_or(0);
-
-        let n_desc = match symbol.linkage {
-            crate::Linkage::External => macho::REFERENCE_FLAG_UNDEFINED_NON_LAZY,
-            crate::Linkage::Global | crate::Linkage::Local => macho::REFERENCE_FLAG_DEFINED,
-        };
+fn write_symbol_table<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result<()> {
+    for symbol in &layout.symbol_table.symbols {
+        let nstrx = *layout.string_table.strings.get(&symbol.name).unwrap();
 
         writer.write_u32(u32::try_from(nstrx).unwrap())?;
-        writer.write_u8(n_type)?;
-        writer.write_u8(section_idx)?;
-        writer.write_u16(n_desc)?;
-        writer.write_u64(builder.vmaddr_of_symbol(symbol_id))?;
+        writer.write_u8(symbol.ntype)?;
+        writer.write_u8(symbol.nsect)?;
+        writer.write_u16(symbol.ndesc)?;
+        writer.write_u64(layout.vmaddr_of_symbol(symbol.id))?;
     }
 
     Ok(())
 }
 
-fn write_entrypoint<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
+fn write_entrypoint<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result<()> {
     let lc_size = size_of::<macho::EntryPointCommand<NE>>();
 
     writer.write_u32(macho::LC_MAIN)?;
     writer.write_u32(u32::try_from(lc_size).unwrap())?;
 
-    let entrypoint = builder.layout.config.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
-    let Some(entrypoint_id) = builder.layout.index.symbol_with_name(entrypoint) else {
-        return Err(SimpleDiagnostic::new(format!("could not find symbol {entrypoint}")).into());
-    };
-
-    let entryoff = builder.offset_of_symbol(entrypoint_id).unwrap();
-    let stacksize = builder.layout.config.stack_size.unwrap_or(0);
+    let entryoff = layout.offset_of_symbol(layout.entrypoint).unwrap();
+    let stacksize = layout.ctx.config.stack_size.unwrap_or(0);
 
     writer.write_u64(entryoff)?; // entryoff
     writer.write_u64(stacksize)?; // stacksize
@@ -568,12 +424,12 @@ fn write_dylinker<W: Writer>(writer: &mut W) -> Result<()> {
     writer.write(DYLINKER_NAME.as_bytes())?;
     writer.write_u8(0)?;
 
-    writer.align_to(align_of::<u64>())?;
+    writer.align_to(align_of::<u64>() as u64)?;
 
     Ok(())
 }
 
-fn write_uuid<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
+fn write_uuid<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result<()> {
     let lc_size = size_of::<macho::UuidCommand<NE>>() as u64;
 
     writer.write_u32(macho::LC_UUID)?;
@@ -582,11 +438,11 @@ fn write_uuid<W: Writer>(builder: &Builder, writer: &mut W) -> Result<()> {
     let mut uuid_hi = 0_u64;
     let mut uuid_lo = 0_u64;
 
-    for file_id in builder.layout.db.files.keys() {
+    for file_id in layout.ctx.db.files.keys() {
         uuid_hi = lume_span::hash_id(&(uuid_hi, file_id)) as u64;
     }
 
-    for object in builder.layout.db.objects.values() {
+    for object in layout.ctx.db.objects.values() {
         uuid_lo = lume_span::hash_id(&(uuid_lo, object.id)) as u64;
     }
 
@@ -621,14 +477,4 @@ fn write_source_version<W: Writer>(writer: &mut W) -> Result<()> {
     writer.write_u64(0)?; // version
 
     Ok(())
-}
-
-fn section_idx_of(builder: &Builder, id: InputSectionId) -> Option<u8> {
-    for (idx, merged_section) in builder.layout.db.output_sections().enumerate() {
-        if merged_section.merged_from.contains(&id) {
-            return Some(u8::try_from(idx).unwrap() + 1);
-        }
-    }
-
-    None
 }

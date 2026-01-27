@@ -7,17 +7,17 @@ use lume_errors::{Result, SimpleDiagnostic};
 pub(crate) mod common;
 pub(crate) use common::*;
 
-pub(crate) use crate::index::Index;
+pub(crate) mod layout;
+pub(crate) use layout::*;
 
 pub(crate) mod index;
-pub mod layout;
+pub(crate) use crate::index::Index;
+
 pub(crate) mod library;
+pub(crate) mod macho;
+pub(crate) mod native;
 pub(crate) mod parse;
 pub(crate) mod write;
-
-pub use layout::*;
-
-pub(crate) mod macho;
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -143,6 +143,19 @@ impl Database {
 
     pub fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
         self.objects.get(&id.object)?.symbols.get(&id)
+    }
+
+    /// Gets the physical size of the section with the given ID, in bytes.
+    ///
+    /// If the end of the section boundary was not on a aligned boundary,
+    /// the size will be rounded up to the next aligned boundary.
+    pub fn size_of_section(&self, id: OutputSectionId) -> u64 {
+        let merged_section = self.output_section(id);
+        if !merged_section.occupies_space() {
+            return 0;
+        }
+
+        align_to(merged_section.size, merged_section.alignment as u64)
     }
 
     /// Gets an iterator over the sections in the given segment.

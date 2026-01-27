@@ -1,10 +1,15 @@
 use lume_errors::Result;
 
-use crate::{Format, LayoutBuilder, Linker, macho};
+use crate::{Context, Format, Linker, macho};
 
 pub(crate) fn write_to<W: Writer>(writer: &mut W, linker: &mut Linker) -> Result<()> {
-    match linker.target.format {
+    let ctx = Context::new(linker);
+
+    match ctx.target.format {
         Format::MachO => {
+            macho::write(ctx, writer)?;
+
+            /*
             let print_entries = linker.config.print_entries;
 
             let mut builder = LayoutBuilder::<macho::Entry>::new(linker);
@@ -18,6 +23,9 @@ pub(crate) fn write_to<W: Writer>(writer: &mut W, linker: &mut Linker) -> Result
             }
 
             macho::emit_layout(writer, layout)
+             */
+
+            Ok(())
         }
         _ => unimplemented!(),
     }
@@ -56,8 +64,8 @@ pub(crate) trait Writer {
     }
 
     /// Ensures the writer is aligned to the given alignment.
-    fn align_to(&mut self, alignment: usize) -> Result<()> {
-        let aligned = crate::align_to(self.len() as u64, alignment as u64);
+    fn align_to(&mut self, alignment: u64) -> Result<()> {
+        let aligned = crate::align_to(self.len() as u64, alignment);
         if aligned > self.len() as u64 {
             self.write(&vec![0; usize::try_from(aligned - self.len() as u64).unwrap()])?;
         }
