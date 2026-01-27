@@ -6,10 +6,7 @@ pub extern crate error_snippet_derive;
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-pub use error_snippet::{
-    Diagnostic, Error, GraphicalRenderer, IntoDiagnostic, Label, Result, SimpleDiagnostic, SpanRange,
-};
-use error_snippet::{Renderer, Severity};
+pub use error_snippet::*;
 pub use error_snippet_derive::Diagnostic;
 
 /// A context to deal with diagnostics, which is meant to

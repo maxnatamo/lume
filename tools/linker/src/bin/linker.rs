@@ -100,11 +100,32 @@ fn main() {
         print_entries: args.print_entries,
     };
 
-    dcx.with_opt(|_dcx| {
+    dcx.with_opt(|dcx| {
         let inputs = read_input_files(args.inputs)?;
         let linked = linker::link(config, inputs)?;
 
         std::fs::write(&args.output, linked).map_cause("could not write output file")?;
+
+        #[cfg(unix)]
+        if let Ok(metadata) = std::fs::metadata(&args.output) {
+            use std::os::unix::fs::PermissionsExt;
+
+            use lume_errors::{Severity, SimpleDiagnostic};
+
+            let mut perms = metadata.permissions();
+
+            // read/execute for owner
+            perms.set_mode(perms.mode() | 0o500);
+
+            if let Err(err) = std::fs::set_permissions(&args.output, perms) {
+                dcx.emit_and_push(
+                    SimpleDiagnostic::new("could not set output as executable")
+                        .with_severity(Severity::Warning)
+                        .add_cause(err)
+                        .into(),
+                );
+            }
+        }
 
         Ok(())
     });
