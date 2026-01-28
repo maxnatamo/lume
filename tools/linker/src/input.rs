@@ -282,7 +282,7 @@ where
         symbols.insert(id, crate::Symbol {
             id,
             object: object_id,
-            name: name.to_owned(),
+            name: SymbolName::parse(name.to_owned()),
             address,
             size: usize::try_from(size).unwrap(),
             linkage,
@@ -297,7 +297,7 @@ where
         symbols.insert(id, crate::Symbol {
             id,
             object: object_id,
-            name: symbol_name.to_owned(),
+            name: SymbolName::parse(symbol_name.to_owned()),
             address: SymbolAddress::Undefined,
             size: 0,
             linkage: Linkage::External,

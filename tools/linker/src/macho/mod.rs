@@ -411,7 +411,7 @@ fn define_symbols(ctx: &Context<'_, Entry>) -> SymbolTable {
 
         symbols.push(Symbol {
             id: symbol.id,
-            name: symbol.name.intern(),
+            name: symbol.name.to_string().intern(),
             ntype,
             ndesc,
             nsect,

@@ -129,11 +129,11 @@ struct Symbols<'sym> {
 
 impl<'sym> Symbols<'sym> {
     fn add_local(&mut self, symbol: &'sym Symbol) {
-        self.locals.insert((symbol.object, &symbol.name), symbol.id);
+        self.locals.insert((symbol.object, &symbol.name.str), symbol.id);
     }
 
     fn add_global(&mut self, symbol: &'sym Symbol) {
-        if let Some(existing) = self.globals.insert(&symbol.name, symbol.id) {
+        if let Some(existing) = self.globals.insert(&symbol.name.str, symbol.id) {
             self.duplicates.push((existing, symbol.id));
         }
     }
@@ -143,7 +143,7 @@ impl<'sym> Symbols<'sym> {
     }
 
     fn add_reference(&mut self, symbol: &'sym Symbol) {
-        self.referenced.entry(symbol.object).or_default().push(&symbol.name);
+        self.referenced.entry(symbol.object).or_default().push(&symbol.name.str);
     }
 
     fn is_symbol_defined(&self, object: ObjectId, name: &str) -> bool {
@@ -188,11 +188,11 @@ impl<'sym> Symbols<'sym> {
                     continue;
                 }
 
-                let file = linker.db().files.get(&obj.file).unwrap();
+                let symbol_path = linker.db().object_path(obj);
 
                 causes.push(
                     SimpleDiagnostic::new(format!("unresolved symbol {symbol}"))
-                        .with_help(format!("referenced in: {}", file.path.display()))
+                        .with_help(format!("referenced in: {symbol_path}"))
                         .into(),
                 );
             }

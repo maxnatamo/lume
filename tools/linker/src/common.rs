@@ -189,11 +189,29 @@ pub struct Symbol {
     pub id: SymbolId,
     pub object: ObjectId,
 
-    pub name: String,
+    pub name: SymbolName,
     pub address: SymbolAddress,
     pub size: usize,
     pub linkage: Linkage,
     pub section: Option<InputSectionId>,
+}
+
+#[derive(derive_more::Display, Hash, Debug, Clone, PartialEq, Eq)]
+#[display("{str}{}", version.as_deref().map_or(String::new(), |v| format!("@@{v}")))]
+pub struct SymbolName {
+    pub str: String,
+    pub version: Option<String>,
+}
+
+impl SymbolName {
+    pub fn parse(name: String) -> Self {
+        let mut parts = name.split("@@");
+
+        let str = parts.next().unwrap().to_string();
+        let version = parts.next().map(|v| v.to_string());
+
+        Self { str, version }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

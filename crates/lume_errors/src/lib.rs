@@ -14,12 +14,8 @@ pub use error_snippet_derive::Diagnostic;
 /// The returned diagnostic is of type [`SimpleDiagnostic`].
 #[macro_export]
 macro_rules! diagnostic {
-    ($message:literal) => {
-        $crate::SimpleDiagnostic::new($message)
-    };
-
-    ($fmt:expr, $($arg:tt)*) => {
-        $crate::SimpleDiagnostic::new(format!($fmt, $($arg)*))
+    ($($fmt:tt)*) => {
+        $crate::SimpleDiagnostic::new(format!($($fmt)*))
     };
 }
 
