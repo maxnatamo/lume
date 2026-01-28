@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
-use error_snippet::Severity;
-use indexmap::IndexSet;
-use lume_errors::{Result, SimpleDiagnostic};
+use indexmap::{IndexMap, IndexSet};
+use lume_errors::{Result, SimpleDiagnostic, diagnostic};
 
 use crate::Config;
 
@@ -11,19 +10,10 @@ pub(crate) fn search_libraries(config: &Config) -> Result<Vec<PathBuf>> {
     let search_paths = library_search_paths(config)?;
 
     let mut lib_files = Vec::new();
+    let index = LibraryIndex::create(&search_paths);
 
     for library_name in library_names {
-        let Some(lib_path) = search_library(&search_paths, &library_name) else {
-            return Err(
-                SimpleDiagnostic::new(format!("could not find library `{library_name}`"))
-                    .add_causes(search_paths.iter().map(|path| {
-                        SimpleDiagnostic::new(format!("searched in {}", path.display())).with_severity(Severity::Info)
-                    }))
-                    .into(),
-            );
-        };
-
-        lib_files.push(lib_path);
+        lib_files.push(index.find(&library_name)?.clone());
     }
 
     Ok(lib_files)
@@ -159,35 +149,71 @@ fn macos_sdk_path() -> Result<PathBuf> {
     Ok(PathBuf::from(path.trim()).join("usr/lib"))
 }
 
-fn search_library(search_paths: &[PathBuf], name: &str) -> Option<PathBuf> {
-    let mut lib_names = Vec::new();
+#[derive(Default)]
+struct LibraryIndex {
+    inner: IndexMap<String, PathBuf>,
+}
 
-    #[cfg(unix)]
-    {
-        lib_names.push(format!("lib{name}.a"));
-        lib_names.push(format!("lib{name}.so"));
-    }
+impl LibraryIndex {
+    fn create(search_paths: &[PathBuf]) -> Self {
+        let mut index = IndexMap::new();
 
-    #[cfg(target_os = "macos")]
-    {
-        lib_names.push(format!("lib{name}.dylib"));
-        lib_names.push(format!("lib{name}.tbd"));
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        lib_names.push(format!("{name}.dll"));
-    }
-
-    for lib_name in lib_names {
         for path in search_paths {
-            let lib_path = path.join(&lib_name);
+            let Ok(dir_entries) = std::fs::read_dir(path) else {
+                continue;
+            };
 
-            if lib_path.exists() {
-                return Some(lib_path);
+            for dir_entry in dir_entries.filter_map(|entry| entry.ok()) {
+                let entry_path = dir_entry.path();
+                if entry_path.is_dir() {
+                    continue;
+                }
+
+                let mut file_name = entry_path.file_name().unwrap().to_str().unwrap();
+
+                // Strip "lib" prefix
+                if file_name.starts_with("lib") {
+                    file_name = &file_name[3..];
+                }
+
+                // Get only the prefix of the file name
+                if let Some(dot_index) = file_name.find('.') {
+                    file_name = &file_name[..dot_index];
+                }
+
+                index.insert(file_name.to_string(), entry_path);
             }
         }
+
+        Self { inner: index }
     }
 
-    None
+    #[inline]
+    fn try_find(&self, library_name: &str) -> Option<&PathBuf> {
+        self.inner.get(library_name)
+    }
+
+    #[inline]
+    fn find(&self, library_name: &str) -> Result<&PathBuf> {
+        if let Some(path) = self.try_find(library_name) {
+            return Ok(path);
+        }
+
+        let mut closest_matches = self
+            .inner
+            .iter()
+            .filter(|(name, _path)| levenshtein::levenshtein(name, library_name) <= 2)
+            .take(3)
+            .collect::<Vec<_>>();
+
+        // Sort them by proximity, just to make it a little easier.
+        closest_matches.sort_by_key(|(name, _path)| levenshtein::levenshtein(name, library_name));
+
+        let mut diag = diagnostic!("could not find library `{library_name}`");
+        for (name, path) in closest_matches {
+            diag = diag.with_help(format!("did you mean {name}? ({})", path.display()));
+        }
+
+        Err(diag.into())
+    }
 }

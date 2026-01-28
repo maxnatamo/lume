@@ -18,6 +18,7 @@ derive_more = { version = "2.1.1", features = ["full"] }
 derive-where = { version = "1.6.0" }
 error_snippet = { workspace = true }
 indexmap = { workspace = true }
+levenshtein = { version = "1.0.5" }
 object = { version = "0.37", features = ["read"] }
 
 # Used for parsing macOS .tbd files
