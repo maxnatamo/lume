@@ -79,6 +79,9 @@ pub struct ObjectFile {
     /// Defines the format of the object file.
     pub format: ObjectFormat,
 
+    /// Name of the archive entry, if the file is part of an archive.
+    pub archive_entry: Option<String>,
+
     /// Lists all sections within the object file.
     pub sections: IndexMap<InputSectionId, InputSection>,
 

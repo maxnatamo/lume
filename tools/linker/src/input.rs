@@ -202,7 +202,10 @@ fn parse_archive(archive_file: &InputFile) -> Result<IndexMap<ObjectId, ObjectFi
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf)?;
 
-        objects.insert(object_id, parse_object_file(object_id, &buf)?);
+        let mut object_file = parse_object_file(object_id, &buf)?;
+        object_file.archive_entry = Some(String::from_utf8_lossy(&name).to_string());
+
+        objects.insert(object_id, object_file);
     }
 
     Ok(objects)
@@ -344,6 +347,7 @@ where
         format,
         sections,
         symbols,
+        archive_entry: None,
     })
 }
 

@@ -158,13 +158,13 @@ impl<'sym> Symbols<'sym> {
             let existing_symbol = linker.db().symbol(existing_id).unwrap();
             let duplicate_symbol = linker.db().symbol(duplicate_id).unwrap();
 
-            let existing_file = linker.db().files.get(&existing_symbol.object.file).unwrap();
-            let symbol_file = linker.db().files.get(&duplicate_symbol.object.file).unwrap();
+            let existing_path = linker.db().object_path(existing_symbol.object);
+            let symbol_path = linker.db().object_path(duplicate_symbol.object);
 
             causes.push(
                 SimpleDiagnostic::new(format!("duplicate symbol {}", duplicate_symbol.name))
-                    .with_help(format!("originally declared here: {}", existing_file.path.display()))
-                    .with_help(format!("  but also declared here: {}", symbol_file.path.display()))
+                    .with_help(format!("originally declared here: {existing_path}"))
+                    .with_help(format!("  but also declared here: {symbol_path}"))
                     .into(),
             );
         }

@@ -108,6 +108,16 @@ impl Database {
         self.objects.get_mut(&id).unwrap()
     }
 
+    pub fn object_path(&self, id: ObjectId) -> String {
+        let obj = self.object(id);
+        let file = self.files.get(&id.file).unwrap();
+
+        match obj.archive_entry.as_deref() {
+            Some(entry) => format!("{}({entry})", file.path.display()),
+            None => file.path.display().to_string(),
+        }
+    }
+
     pub fn framework(&self, id: LibraryId) -> &FrameworkLibrary {
         self.frameworks.get(&id).unwrap()
     }
