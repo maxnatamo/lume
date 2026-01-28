@@ -1,33 +1,13 @@
 use lume_errors::Result;
 
-use crate::{Context, Format, Linker, macho};
+use crate::{Context, Linker, ObjectFormat, macho};
 
 pub(crate) fn write_to<W: Writer>(writer: &mut W, linker: &mut Linker) -> Result<()> {
     let ctx = Context::new(linker);
 
     match ctx.target.format {
-        Format::MachO => {
-            macho::write(ctx, writer)?;
-
-            /*
-            let print_entries = linker.config.print_entries;
-
-            let mut builder = LayoutBuilder::<macho::Entry>::new(linker);
-            macho::declare_layout(&mut builder);
-
-            let layout = builder.into_layout();
-
-            #[allow(clippy::disallowed_macros, reason = "used for non-logging purposes in the CLI")]
-            if print_entries {
-                println!("{layout}");
-            }
-
-            macho::emit_layout(writer, layout)
-             */
-
-            Ok(())
-        }
-        _ => unimplemented!(),
+        ObjectFormat::MachO => macho::write(ctx, writer),
+        ObjectFormat::Elf => unimplemented!(),
     }
 }
 

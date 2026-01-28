@@ -4,11 +4,13 @@ use std::path::PathBuf;
 
 use indexmap::{IndexMap, IndexSet};
 
+use crate::*;
+
 /// Representation of a target which is expected to run the linked executables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target {
     pub arch: Architecture,
-    pub format: Format,
+    pub format: ObjectFormat,
 }
 
 impl Target {
@@ -55,64 +57,65 @@ impl Architecture {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    #[default]
-    Unknown,
-    MachO,
-    Elf,
-}
-
-#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
-pub struct InputFileId(pub usize);
-
-#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
+/// Unique identifier for an object file.
+#[derive(derive_more::Display, Debug, Hash, Clone, Copy, PartialEq, Eq)]
+#[display("obj-{}-{id}", file.0)]
 pub struct ObjectId {
+    /// Defines the ID of the input file, from which the object file was parsed.
+    ///
+    /// Note: this ID may not be unique across all objects, since multiple
+    /// objects may be loaded from the same archive file (`.a` files).
     pub file: InputFileId,
+
     pub id: usize,
 }
 
-impl ObjectId {
-    pub fn new<N: Hash>(file: InputFileId, name: &N) -> Self {
-        Self {
-            file,
-            id: lume_span::hash_id(name),
-        }
-    }
-}
-
-/// Represents an object file which is being linked, along with zero-or-more
-/// other object files and libraries.
-#[derive(Clone)]
-pub struct Object {
+/// Represents a single parsed object file.
+#[derive(derive_more::Debug, Clone)]
+pub struct ObjectFile {
+    /// Unique identifier for the object file.
     pub id: ObjectId,
 
-    /// The ID of the file this object was loaded from.
-    ///
-    /// Note: this ID may not be unique across all objects, since multiple
-    /// objects may be loaded from the same archive file (`.ar` files).
-    pub file: InputFileId,
+    /// Defines the format of the object file.
+    pub format: ObjectFormat,
 
-    pub format: Format,
+    /// Lists all sections within the object file.
     pub sections: IndexMap<InputSectionId, InputSection>,
+
+    /// Lists all symbols within the object file.
     pub symbols: IndexMap<SymbolId, Symbol>,
 }
 
-#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
+/// Unique identifier for a library.
+#[derive(derive_more::Display, Debug, Hash, Clone, Copy, PartialEq, Eq)]
+#[display("lib-{_0}")]
 pub struct LibraryId(pub usize);
 
 impl LibraryId {
+    #[allow(dead_code, reason = "only used on macOS")]
     pub fn new<N: Hash>(name: &N) -> Self {
         Self(lume_span::hash_id(name))
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Library {
+/// Represents a library within a parsed framework file.
+#[derive(derive_more::Debug, Clone)]
+pub struct FrameworkLibrary {
+    /// Defines the unique identifier for the library.
     pub id: LibraryId,
+
+    /// Defines the full path to the library within the framework file.
+    ///
+    /// Note: because of how Mach-O represents dylib paths in macOS, this path
+    /// likely doesn't exist (depending on the version of macOS).
     pub path: PathBuf,
-    pub required: bool,
-    pub symbols: Vec<DynamicSymbol>,
+
+    /// Determines whether the library should be loaded, even when no required
+    /// symbols are found.
+    pub force_load: bool,
+
+    /// Lists all symbols within the library.
+    pub symbols: IndexSet<String>,
 }
 
 #[derive(Hash, Default, Clone, PartialEq, Eq)]
@@ -146,7 +149,7 @@ impl InputSectionId {
     }
 }
 
-#[derive(Clone)]
+#[derive(derive_more::Debug, Clone)]
 pub struct InputSection {
     pub id: InputSectionId,
 
@@ -155,7 +158,10 @@ pub struct InputSection {
 
     pub placement: Option<Placement>,
     pub alignment: usize,
+
+    #[debug(skip)]
     pub data: Vec<u8>,
+
     pub kind: SectionKind,
     pub relocations: Vec<Relocation>,
 }
@@ -175,7 +181,7 @@ impl SymbolId {
     }
 }
 
-#[derive(Clone)]
+#[derive(derive_more::Debug, Clone)]
 pub struct Symbol {
     pub id: SymbolId,
     pub object: ObjectId,
@@ -209,12 +215,6 @@ pub enum Linkage {
     External,
     Global,
     Local,
-}
-
-#[derive(Debug, Clone)]
-pub struct DynamicSymbol {
-    pub library: LibraryId,
-    pub name: String,
 }
 
 #[derive(Debug, Clone)]

@@ -38,8 +38,10 @@ impl Linker {
             }
         }
 
-        for symbol in self.db().dynamic_symbols() {
-            symbols.add_dynamic(symbol);
+        for framework in self.db.frameworks.values() {
+            for symbol_name in &framework.symbols {
+                symbols.add_dynamic(symbol_name, framework.id);
+            }
         }
 
         symbols.ensure_no_duplicates(self)?;
@@ -136,8 +138,8 @@ impl<'sym> Symbols<'sym> {
         }
     }
 
-    fn add_dynamic(&mut self, symbol: &'sym DynamicSymbol) {
-        self.dynamic.insert(&symbol.name, symbol.library);
+    fn add_dynamic(&mut self, symbol_name: &'sym str, library: LibraryId) {
+        self.dynamic.insert(symbol_name, library);
     }
 
     fn add_reference(&mut self, symbol: &'sym Symbol) {
@@ -161,8 +163,8 @@ impl<'sym> Symbols<'sym> {
 
             causes.push(
                 SimpleDiagnostic::new(format!("duplicate symbol {}", duplicate_symbol.name))
-                    .with_help(format!("originally declared here: {}", existing_file.display()))
-                    .with_help(format!("  but also declared here: {}", symbol_file.display()))
+                    .with_help(format!("originally declared here: {}", existing_file.path.display()))
+                    .with_help(format!("  but also declared here: {}", symbol_file.path.display()))
                     .into(),
             );
         }
@@ -190,7 +192,7 @@ impl<'sym> Symbols<'sym> {
 
                 causes.push(
                     SimpleDiagnostic::new(format!("unresolved symbol {symbol}"))
-                        .with_help(format!("referenced in: {}", file.display()))
+                        .with_help(format!("referenced in: {}", file.path.display()))
                         .into(),
                 );
             }

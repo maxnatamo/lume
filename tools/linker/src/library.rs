@@ -1,61 +1,21 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use error_snippet::Severity;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexSet;
 use lume_errors::{Result, SimpleDiagnostic};
 
 use crate::Config;
-use crate::common::*;
 
-#[cfg(target_os = "macos")]
-mod tbd;
-
-#[derive(Clone)]
-#[derive_where::derive_where(PartialEq, Eq, Hash)]
-struct LibraryName {
-    pub name: String,
-
-    #[derive_where(skip)]
-    pub required: bool,
-}
-
-impl LibraryName {
-    pub fn required<N: Into<String>>(name: N) -> Self {
-        Self {
-            name: name.into(),
-            required: true,
-        }
-    }
-
-    pub fn optional<N: Into<String>>(name: N) -> Self {
-        Self {
-            name: name.into(),
-            required: false,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ParsedLibrary {
-    pub path: PathBuf,
-    pub symbols: Vec<ParsedDynamicSymbol>,
-}
-
-#[derive(Clone)]
-struct ParsedDynamicSymbol {
-    pub name: String,
-}
-
-pub(crate) fn read_libraries(config: &Config, target: Target) -> Result<IndexMap<LibraryId, Library>> {
+pub(crate) fn search_libraries(config: &Config) -> Result<Vec<PathBuf>> {
     let library_names = default_libraries(config);
     let search_paths = library_search_paths(config)?;
 
-    let mut libraries = IndexMap::new();
+    let mut lib_files = Vec::new();
 
     for library_name in library_names {
-        let Some(lib_path) = search_library(&search_paths, &library_name.name) else {
+        let Some(lib_path) = search_library(&search_paths, &library_name) else {
             return Err(
-                SimpleDiagnostic::new(format!("could not find library `{}`", library_name.name))
+                SimpleDiagnostic::new(format!("could not find library `{library_name}`"))
                     .add_causes(search_paths.iter().map(|path| {
                         SimpleDiagnostic::new(format!("searched in {}", path.display())).with_severity(Severity::Info)
                     }))
@@ -63,54 +23,35 @@ pub(crate) fn read_libraries(config: &Config, target: Target) -> Result<IndexMap
             );
         };
 
-        for parsed_lib in read_library_symbols(&lib_path, target)? {
-            let lib_id = LibraryId::new(&parsed_lib.path);
-            let mut library_symbols = Vec::new();
-
-            for symbol in parsed_lib.symbols {
-                library_symbols.push(DynamicSymbol {
-                    library: lib_id,
-                    name: symbol.name,
-                });
-            }
-
-            let entry = libraries.entry(lib_id).or_insert(Library {
-                id: lib_id,
-                path: parsed_lib.path,
-                required: library_name.required,
-                symbols: Vec::new(),
-            });
-
-            entry.symbols.extend(library_symbols);
-        }
+        lib_files.push(lib_path);
     }
 
-    Ok(libraries)
+    Ok(lib_files)
 }
 
-fn default_libraries(config: &Config) -> IndexSet<LibraryName> {
+fn default_libraries(config: &Config) -> IndexSet<String> {
     let mut libs = IndexSet::new();
 
     #[cfg(unix)]
     {
-        libs.insert(LibraryName::required("c"));
-        libs.insert(LibraryName::optional("m"));
+        libs.insert(String::from("c"));
+        libs.insert(String::from("m"));
     }
 
     #[cfg(target_os = "macos")]
     {
-        libs.insert(LibraryName::required("System"));
+        libs.insert(String::from("System"));
     }
 
-    libs.extend(config.libraries.iter().map(LibraryName::optional));
+    libs.extend(config.libraries.clone());
 
     libs
 }
 
 fn library_search_paths(config: &Config) -> Result<Vec<PathBuf>> {
-    fn split_env_paths(env_var: &str) -> Vec<PathBuf> {
+    fn split_env_paths(env_var: &str) -> IndexSet<PathBuf> {
         let Ok(env_value) = std::env::var(env_var) else {
-            return Vec::new();
+            return IndexSet::new();
         };
 
         env_value
@@ -128,6 +69,11 @@ fn library_search_paths(config: &Config) -> Result<Vec<PathBuf>> {
         paths.extend(split_env_paths("LIBRARY_PATH"));
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        paths.extend(linux_ld_search_paths()?);
+    }
+
     #[cfg(target_os = "macos")]
     {
         paths.push(macos_sdk_path()?);
@@ -139,6 +85,46 @@ fn library_search_paths(config: &Config) -> Result<Vec<PathBuf>> {
     }
 
     Ok(paths)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ld_search_paths() -> Result<IndexSet<PathBuf>> {
+    use lume_errors::MapDiagnostic;
+
+    static SEARCH_PATH_PATTERN: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"SEARCH_DIR\("=(?<path>[a-zA-Z0-9-_/]+)"\);"#).unwrap());
+
+    let mut command = std::process::Command::new("ld");
+    command.args(["--verbose"]);
+
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => return Err(SimpleDiagnostic::new(format!("could not invoke ld: {err}")).into()),
+    };
+
+    if !output.status.success() {
+        return Err(SimpleDiagnostic::new(format!(
+            "ld exited with status code {}\n\n{}",
+            output.status.code().unwrap_or_default(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+        .into());
+    }
+
+    let output = String::from_utf8(output.stdout).map_cause("could not read output of ld")?;
+    let mut search_paths = IndexSet::new();
+
+    for capture in SEARCH_PATH_PATTERN.captures_iter(&output) {
+        let path = capture.name("path").unwrap().as_str();
+
+        search_paths.insert(PathBuf::from(path));
+    }
+
+    Ok(search_paths)
 }
 
 #[cfg(target_os = "macos")]
@@ -204,13 +190,4 @@ fn search_library(search_paths: &[PathBuf], name: &str) -> Option<PathBuf> {
     }
 
     None
-}
-
-fn read_library_symbols(lib_path: &Path, target: Target) -> Result<Vec<ParsedLibrary>> {
-    #[cfg(target_os = "macos")]
-    if lib_path.extension().is_some_and(|ext| ext.to_str() == Some("tbd")) {
-        return tbd::read_symbols(lib_path, target);
-    }
-
-    Err(SimpleDiagnostic::new(format!("unsupported library format: {:?}", lib_path.extension())).into())
 }

@@ -262,7 +262,7 @@ impl Layout<'_> {
         self.ctx.declare_entry(Entry::SourceVersion);
 
         for library_id in self.libraries.iter().copied() {
-            let library_name = self.ctx.db.library(library_id).path.display().to_string();
+            let library_name = self.ctx.db.framework(library_id).path.display().to_string();
 
             self.ctx
                 .declare_entry(Entry::DylibHeader(library_id, library_name.intern()));

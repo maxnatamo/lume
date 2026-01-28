@@ -3,8 +3,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use clap::error::ContextValue;
-use linker::InputFile;
-use lume_errors::{DiagCtx, MapDiagnostic, Result};
+use lume_errors::{DiagCtx, MapDiagnostic};
 
 #[derive(Clone)]
 pub(crate) struct HexParser;
@@ -101,7 +100,7 @@ fn main() {
     };
 
     dcx.with_opt(|dcx| {
-        let inputs = read_input_files(args.inputs)?;
+        let inputs = args.inputs;
         let linked = linker::link(config, inputs)?;
 
         std::fs::write(&args.output, linked).map_cause("could not write output file")?;
@@ -137,19 +136,4 @@ fn main() {
 
     dcx.render_stderr(&mut renderer);
     dcx.clear();
-}
-
-fn read_input_files<'data>(inputs: Vec<PathBuf>) -> Result<Vec<InputFile<'data>>> {
-    let mut files = Vec::new();
-
-    for path in inputs {
-        let content = std::fs::read(&path).map_cause(format!("could not read input file {}", path.display()))?;
-
-        files.push(InputFile {
-            path,
-            content: std::borrow::Cow::Owned(content),
-        });
-    }
-
-    Ok(files)
 }

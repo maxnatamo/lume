@@ -9,6 +9,20 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub use error_snippet::*;
 pub use error_snippet_derive::Diagnostic;
 
+/// Creates a new diagnostic with the given (optionally formatted) message.
+///
+/// The returned diagnostic is of type [`SimpleDiagnostic`].
+#[macro_export]
+macro_rules! diagnostic {
+    ($message:literal) => {
+        $crate::SimpleDiagnostic::new($message)
+    };
+
+    ($fmt:expr, $($arg:tt)*) => {
+        $crate::SimpleDiagnostic::new(format!($fmt, $($arg)*))
+    };
+}
+
 /// A context to deal with diagnostics, which is meant to
 /// be used throughout the entire lifespan of the compiler / driver
 /// process.

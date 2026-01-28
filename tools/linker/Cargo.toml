@@ -29,6 +29,10 @@ serde-saphyr = { version = "0.0.14" }
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.180" }
 
+# Parsing search paths from LD
+[target.'cfg(target_os = "linux")'.dependencies]
+regex = { version = "1.11.1" }
+
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = ["sysinfoapi"] }
 

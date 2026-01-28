@@ -1566,6 +1566,7 @@ dependencies = [
  "lume_errors",
  "lume_span",
  "object",
+ "regex",
  "serde",
  "serde-saphyr",
  "winapi",

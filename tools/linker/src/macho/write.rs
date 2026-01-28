@@ -335,7 +335,7 @@ fn write_dysymtab_header<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Resu
 }
 
 fn write_dylib_header<W: Writer>(layout: &Layout<'_>, library_id: LibraryId, writer: &mut W) -> Result<()> {
-    let library = layout.ctx.db.library(library_id);
+    let library = layout.ctx.db.framework(library_id);
     let library_path = library.path.display().to_string();
 
     let name_size = library_path.len() + 1;
@@ -348,9 +348,9 @@ fn write_dylib_header<W: Writer>(layout: &Layout<'_>, library_id: LibraryId, wri
 
     // The library name is placed right after the load command
     writer.write_u32(u32::try_from(size_of::<macho::DylibCommand<NE>>()).unwrap())?; // name
-    writer.write_u32(0x0000_0000)?; // timestamp
-    writer.write_u32(0x0000_0000)?; // current_version
-    writer.write_u32(0x0000_0000)?; // compatibility_version
+    writer.write_u32(0x0000_0002)?; // timestamp
+    writer.write_u32(0x054C_0000)?; // current_version
+    writer.write_u32(0x0001_0000)?; // compatibility_version
 
     writer.write(library_path.as_bytes())?;
     writer.write_u8(0)?;

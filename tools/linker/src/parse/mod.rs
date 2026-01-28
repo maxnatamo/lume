@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use lume_errors::{MapDiagnostic, Result};
 use object::{Object as _, ObjectSection, ObjectSymbol};
 
-use crate::common::*;
+use crate::*;
 
 /// Magic number for `.ar` archive files.
 const AR_FILE_MAGIC: [u8; 8] = *b"!<arch>\n";

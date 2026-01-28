@@ -1,11 +1,13 @@
-use std::borrow::Cow;
 use std::path::PathBuf;
 
 use indexmap::{IndexMap, IndexSet};
-use lume_errors::{Result, SimpleDiagnostic};
+use lume_errors::Result;
 
 pub(crate) mod common;
 pub(crate) use common::*;
+
+pub(crate) mod input;
+pub(crate) use input::*;
 
 pub(crate) mod layout;
 pub(crate) use layout::*;
@@ -16,7 +18,6 @@ pub(crate) use crate::index::Index;
 pub(crate) mod library;
 pub(crate) mod macho;
 pub(crate) mod native;
-pub(crate) mod parse;
 pub(crate) mod write;
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -37,29 +38,30 @@ pub struct Config {
     pub print_entries: bool,
 }
 
-#[derive(Clone)]
-pub struct InputFile<'data> {
-    pub path: PathBuf,
-    pub content: Cow<'data, [u8]>,
-}
-
-pub fn link<'data, I>(config: Config, inputs: I) -> Result<Box<[u8]>>
+pub fn link<I>(config: Config, input_files: I) -> Result<Box<[u8]>>
 where
-    I: IntoIterator<Item = InputFile<'data>>,
+    I: IntoIterator<Item = PathBuf>,
 {
-    let inputs = inputs.into_iter().collect::<Vec<_>>();
-    let (files, objects) = parse_objects(inputs)?;
-    let target = target_from(objects.values());
+    let arch = Architecture::default();
 
-    let libraries = library::read_libraries(&config, target)?;
+    let mut inputs = input_files.into_iter().collect::<Vec<_>>();
+    inputs.extend(library::search_libraries(&config)?);
+
+    let read_inputs = input::read_inputs(inputs)?;
+    let parsed_inputs = input::parse_inputs(read_inputs.values(), arch)?;
+
+    let target = Target {
+        arch,
+        format: parsed_inputs.objects.values().next().unwrap().format,
+    };
 
     let mut linker = Linker {
         config,
         target,
         db: Database {
-            objects,
-            libraries,
-            files,
+            files: read_inputs,
+            objects: parsed_inputs.objects,
+            frameworks: parsed_inputs.frameworks,
             ..Database::default()
         },
         index: Index::default(),
@@ -89,25 +91,25 @@ impl Linker {
 
 #[derive(Default)]
 struct Database {
-    objects: IndexMap<ObjectId, Object>,
-    libraries: IndexMap<LibraryId, Library>,
-    files: IndexMap<InputFileId, PathBuf>,
+    pub files: IndexMap<InputFileId, InputFile>,
+    pub objects: IndexMap<ObjectId, ObjectFile>,
+    pub frameworks: IndexMap<LibraryId, FrameworkLibrary>,
 
     output_segments: IndexMap<String, IndexSet<OutputSectionId>>,
     output_sections: IndexMap<OutputSectionId, OutputSection>,
 }
 
 impl Database {
-    pub fn object(&self, id: ObjectId) -> &Object {
+    pub fn object(&self, id: ObjectId) -> &ObjectFile {
         self.objects.get(&id).unwrap()
     }
 
-    pub fn object_mut(&mut self, id: ObjectId) -> &mut Object {
+    pub fn object_mut(&mut self, id: ObjectId) -> &mut ObjectFile {
         self.objects.get_mut(&id).unwrap()
     }
 
-    pub fn library(&self, id: LibraryId) -> &Library {
-        self.libraries.get(&id).unwrap()
+    pub fn framework(&self, id: LibraryId) -> &FrameworkLibrary {
+        self.frameworks.get(&id).unwrap()
     }
 
     pub fn input_section(&self, id: InputSectionId) -> &InputSection {
@@ -137,10 +139,6 @@ impl Database {
         self.objects.values().flat_map(|object| object.symbols.values())
     }
 
-    pub fn dynamic_symbols(&self) -> impl Iterator<Item = &DynamicSymbol> {
-        self.libraries.values().flat_map(|lib| lib.symbols.iter())
-    }
-
     pub fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
         self.objects.get(&id.object)?.symbols.get(&id)
     }
@@ -167,44 +165,5 @@ impl Database {
             .map_or(EMPTY, |seg| seg.as_slice())
             .iter()
             .copied()
-    }
-}
-
-fn parse_objects(inputs: Vec<InputFile<'_>>) -> Result<(IndexMap<InputFileId, PathBuf>, IndexMap<ObjectId, Object>)> {
-    let mut files = IndexMap::new();
-    let mut objects = IndexMap::new();
-
-    for input in inputs {
-        let id = InputFileId(files.len());
-        let file_name = input.path.display().to_string();
-
-        let parsed_objects = match parse::parse_object_file(id, &file_name, input.content.as_ref()) {
-            Ok(object) => object,
-            Err(err) => {
-                return Err(
-                    SimpleDiagnostic::new(format!("could not parse object file {}", input.path.display()))
-                        .add_cause(err)
-                        .into(),
-                );
-            }
-        };
-
-        files.insert(id, input.path);
-
-        for object in parsed_objects {
-            objects.insert(object.id, object);
-        }
-    }
-
-    Ok((files, objects))
-}
-
-fn target_from<'obj>(mut objects: impl Iterator<Item = &'obj Object>) -> Target {
-    let first_object = objects.next().unwrap();
-    let format = first_object.format;
-
-    Target {
-        arch: Architecture::default(),
-        format,
     }
 }

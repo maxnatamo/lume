@@ -86,7 +86,7 @@ impl<'db, E: SizedEntry> Context<'db, E> {
     pub(crate) fn required_library_ids(&self) -> IndexSet<LibraryId> {
         let mut library_ids: IndexSet<_> = self.index.dynamic_symbols.values().copied().collect();
 
-        for required_lib in self.db.libraries.values().filter(|lib| lib.required) {
+        for required_lib in self.db.frameworks.values().filter(|lib| lib.force_load) {
             library_ids.insert(required_lib.id);
         }
 
