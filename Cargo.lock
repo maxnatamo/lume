@@ -1561,6 +1561,7 @@ dependencies = [
  "derive-where",
  "derive_more",
  "error_snippet",
+ "glob",
  "indexmap",
  "levenshtein",
  "libc",

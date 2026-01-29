@@ -1,44 +1,45 @@
 use std::path::PathBuf;
 
 use indexmap::{IndexMap, IndexSet};
-use lume_errors::{Result, SimpleDiagnostic, diagnostic};
+use lume_errors::{Result, diagnostic};
 
 use crate::Config;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(target_os = "linux")]
+mod linux;
+
 pub(crate) fn search_libraries(config: &Config) -> Result<Vec<PathBuf>> {
-    let library_names = default_libraries(config);
-    let search_paths = library_search_paths(config)?;
+    let allowed_extensions = allow_library_extensions();
+    let search_paths = search_paths(config)?;
 
-    let mut lib_files = Vec::new();
-    let index = LibraryIndex::create(&search_paths);
+    let index = LibraryIndex::create(&search_paths, allowed_extensions);
 
-    for library_name in library_names {
-        lib_files.push(index.find(&library_name)?.clone());
-    }
-
-    Ok(lib_files)
+    default_libraries(config)
+        .into_iter()
+        .map(|library_name| index.find(&library_name).cloned())
+        .collect()
 }
 
 fn default_libraries(config: &Config) -> IndexSet<String> {
-    let mut libs = IndexSet::new();
-
-    #[cfg(unix)]
-    {
-        libs.insert(String::from("c"));
-        libs.insert(String::from("m"));
-    }
+    #[cfg(target_os = "linux")]
+    return linux::default_libraries(config);
 
     #[cfg(target_os = "macos")]
-    {
-        libs.insert(String::from("System"));
-    }
-
-    libs.extend(config.libraries.clone());
-
-    libs
+    return macos::default_libraries(config);
 }
 
-fn library_search_paths(config: &Config) -> Result<Vec<PathBuf>> {
+fn allow_library_extensions() -> &'static [&'static str] {
+    #[cfg(target_os = "linux")]
+    return linux::ALLOWED_EXTENSIONS;
+
+    #[cfg(target_os = "macos")]
+    return macos::ALLOWED_EXTENSIONS;
+}
+
+pub fn search_paths(config: &Config) -> Result<Vec<PathBuf>> {
     fn split_env_paths(env_var: &str) -> IndexSet<PathBuf> {
         let Ok(env_value) = std::env::var(env_var) else {
             return IndexSet::new();
@@ -61,12 +62,12 @@ fn library_search_paths(config: &Config) -> Result<Vec<PathBuf>> {
 
     #[cfg(target_os = "linux")]
     {
-        paths.extend(linux_ld_search_paths()?);
+        paths.extend(linux::search_paths()?);
     }
 
     #[cfg(target_os = "macos")]
     {
-        paths.push(macos_sdk_path()?);
+        paths.push(macos::search_path()?);
     }
 
     #[cfg(target_os = "windows")]
@@ -77,85 +78,13 @@ fn library_search_paths(config: &Config) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-#[cfg(target_os = "linux")]
-fn linux_ld_search_paths() -> Result<IndexSet<PathBuf>> {
-    use lume_errors::MapDiagnostic;
-
-    static SEARCH_PATH_PATTERN: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r#"SEARCH_DIR\("=(?<path>[a-zA-Z0-9-_/]+)"\);"#).unwrap());
-
-    let mut command = std::process::Command::new("ld");
-    command.args(["--verbose"]);
-
-    command.stdin(std::process::Stdio::null());
-    command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::piped());
-
-    let output = match command.output() {
-        Ok(output) => output,
-        Err(err) => return Err(SimpleDiagnostic::new(format!("could not invoke ld: {err}")).into()),
-    };
-
-    if !output.status.success() {
-        return Err(SimpleDiagnostic::new(format!(
-            "ld exited with status code {}\n\n{}",
-            output.status.code().unwrap_or_default(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-        .into());
-    }
-
-    let output = String::from_utf8(output.stdout).map_cause("could not read output of ld")?;
-    let mut search_paths = IndexSet::new();
-
-    for capture in SEARCH_PATH_PATTERN.captures_iter(&output) {
-        let path = capture.name("path").unwrap().as_str();
-
-        search_paths.insert(PathBuf::from(path));
-    }
-
-    Ok(search_paths)
-}
-
-#[cfg(target_os = "macos")]
-fn macos_sdk_path() -> Result<PathBuf> {
-    use std::process::{Command, Stdio};
-
-    use lume_errors::MapDiagnostic;
-
-    let mut command = Command::new("xcrun");
-    command.args(["--sdk", "macosx", "--show-sdk-path"]);
-
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-
-    let output = match command.output() {
-        Ok(output) => output,
-        Err(err) => return Err(SimpleDiagnostic::new(format!("could not invoke xcrun: {err}")).into()),
-    };
-
-    if !output.status.success() {
-        return Err(SimpleDiagnostic::new(format!(
-            "xcrun exited with status code {}\n\n{}",
-            output.status.code().unwrap_or_default(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-        .into());
-    }
-
-    let path = String::from_utf8(output.stdout).map_cause("could not read output of xcrun")?;
-
-    Ok(PathBuf::from(path.trim()).join("usr/lib"))
-}
-
 #[derive(Default)]
 struct LibraryIndex {
     inner: IndexMap<String, PathBuf>,
 }
 
 impl LibraryIndex {
-    fn create(search_paths: &[PathBuf]) -> Self {
+    fn create(search_paths: &[PathBuf], allowed_extensions: &[&str]) -> Self {
         let mut index = IndexMap::new();
 
         for path in search_paths {
@@ -170,6 +99,13 @@ impl LibraryIndex {
                 }
 
                 let mut file_name = entry_path.file_name().unwrap().to_str().unwrap();
+                let Some(extension) = unversioned_extension(file_name) else {
+                    continue;
+                };
+
+                if !allowed_extensions.contains(&extension) {
+                    continue;
+                }
 
                 // Strip "lib" prefix
                 if file_name.starts_with("lib") {
@@ -216,4 +152,27 @@ impl LibraryIndex {
 
         Err(diag.into())
     }
+}
+
+/// Extracts the unversioned extension from a file name.
+///
+/// Returns [`None`] if no extension was found or if the extension is not
+/// alphabetic.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(unversioned_extension("libc.a"), Some("a"));
+/// assert_eq!(unversioned_extension("libfoo.so.3.1.10"), Some("so"));
+/// assert_eq!(unversioned_extension("libbar.G4.o"), Some("o"));
+/// assert_eq!(unversioned_extension("libbaz.threads.dylib"), Some("dylib"));
+/// assert_eq!(unversioned_extension("cpp"), None);
+/// ```
+fn unversioned_extension(file_name: &str) -> Option<&str> {
+    let mut file_name_component_iter = file_name.split('.');
+
+    // Skip the file prefix before the first period
+    file_name_component_iter.next();
+
+    file_name_component_iter.rfind(|comp| comp.chars().all(|c| c.is_alphabetic()))
 }

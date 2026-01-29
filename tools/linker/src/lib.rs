@@ -15,7 +15,7 @@ pub(crate) use layout::*;
 pub(crate) mod index;
 pub(crate) use crate::index::Index;
 
-pub(crate) mod library;
+pub mod library;
 pub(crate) mod macho;
 pub(crate) mod native;
 pub(crate) mod write;

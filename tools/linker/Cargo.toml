@@ -32,6 +32,7 @@ libc = { version = "0.2.180" }
 
 # Parsing search paths from LD
 [target.'cfg(target_os = "linux")'.dependencies]
+glob = { version = "0.3.3" }
 regex = { version = "1.11.1" }
 
 [target.'cfg(windows)'.dependencies]

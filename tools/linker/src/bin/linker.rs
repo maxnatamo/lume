@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_macros)]
+
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
@@ -85,6 +87,10 @@ pub(crate) struct Arguments {
     /// Print the output entries before writing the output file
     #[arg(long)]
     pub print_entries: bool,
+
+    /// Print the search paths and exit
+    #[arg(long)]
+    pub print_search_paths: bool,
 }
 
 fn main() {
@@ -98,6 +104,14 @@ fn main() {
         stack_size: args.stack_size,
         print_entries: args.print_entries,
     };
+
+    if args.print_search_paths {
+        let search_paths = linker::library::search_paths(&config).unwrap_or_default();
+        for path in search_paths {
+            println!("{}", path.display());
+        }
+        return;
+    }
 
     dcx.with_opt(|dcx| {
         let inputs = args.inputs;
