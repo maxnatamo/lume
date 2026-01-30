@@ -115,7 +115,7 @@ fn main() {
 
     dcx.with_opt(|dcx| {
         let inputs = args.inputs;
-        let linked = linker::link(config, inputs)?;
+        let linked = linker::link(config, inputs, &dcx)?;
 
         std::fs::write(&args.output, linked).map_cause("could not write output file")?;
 

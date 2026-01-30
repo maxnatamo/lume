@@ -3,6 +3,7 @@ use std::hash::Hash;
 use std::path::PathBuf;
 
 use indexmap::{IndexMap, IndexSet};
+use lume_span::{Internable, Interned};
 
 use crate::*;
 
@@ -196,21 +197,36 @@ pub struct Symbol {
     pub section: Option<InputSectionId>,
 }
 
-#[derive(derive_more::Display, Hash, Debug, Clone, PartialEq, Eq)]
-#[display("{str}{}", version.as_deref().map_or(String::new(), |v| format!("@@{v}")))]
-pub struct SymbolName {
-    pub str: String,
-    pub version: Option<String>,
+#[derive(derive_more::Display, Hash, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolName {
+    #[display("{base}@@{version}")]
+    Versioned {
+        base: Interned<String>,
+        version: Interned<String>,
+    },
+
+    #[display("{name}")]
+    Unversioned { name: Interned<String> },
 }
 
 impl SymbolName {
     pub fn parse(name: String) -> Self {
         let mut parts = name.split("@@");
 
-        let str = parts.next().unwrap().to_string();
-        let version = parts.next().map(|v| v.to_string());
+        let base = parts.next().unwrap().to_string().intern();
+        let version = parts.next().map(|v| v.to_string().intern());
 
-        Self { str, version }
+        match version {
+            Some(version) => Self::Versioned { base, version },
+            None => Self::Unversioned { name: base },
+        }
+    }
+
+    pub fn base(self) -> Interned<String> {
+        match self {
+            SymbolName::Versioned { base, .. } => base,
+            SymbolName::Unversioned { name } => name,
+        }
     }
 }
 
@@ -234,7 +250,7 @@ pub enum SymbolAddress {
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
 pub enum Linkage {
     External,
-    Global,
+    Global { weak: bool },
     Local,
 }
 

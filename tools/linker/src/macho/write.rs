@@ -265,7 +265,7 @@ fn write_symtab_header<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result
     let lc_size = size_of::<macho::SymtabCommand<NE>>();
 
     let symoff = layout.ctx.offset_of_entry(&Entry::SymbolTable);
-    let nsyms = layout.ctx.index.symbols.len();
+    let nsyms = layout.ctx.symbols.count();
 
     let stroff = layout.ctx.offset_of_entry(&Entry::StringTable);
     let strsize = layout.ctx.size_of_entry(&Entry::StringTable);
@@ -290,7 +290,7 @@ fn write_dysymtab_header<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Resu
         let linkage = layout.ctx.db.symbol(symbol.id).unwrap().linkage;
 
         match linkage {
-            Linkage::Local | Linkage::Global => {
+            Linkage::Local | Linkage::Global { .. } => {
                 local_sym_len += 1;
             }
             Linkage::External => {

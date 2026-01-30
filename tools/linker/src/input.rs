@@ -269,8 +269,10 @@ where
 
         let linkage = if obj_symbol.is_undefined() {
             Linkage::External
-        } else if obj_symbol.is_global() && obj_symbol.scope() != object::SymbolScope::Linkage {
-            Linkage::Global
+        } else if obj_symbol.is_global() {
+            Linkage::Global {
+                weak: obj_symbol.is_weak(),
+            }
         } else {
             Linkage::Local
         };

@@ -29,6 +29,7 @@ pub fn default_libraries(config: &Config) -> IndexSet<String> {
     libs.insert(String::from("c"));
     libs.insert(String::from("gcc"));
     libs.insert(String::from("gcc_s"));
+    libs.insert(String::from("gcc_eh"));
     libs.insert(String::from("crtendS"));
     libs.insert(String::from("crtn"));
 

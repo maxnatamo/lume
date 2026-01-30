@@ -4,8 +4,7 @@ use std::hash::Hash;
 use indexmap::{IndexMap, IndexSet};
 use lume_span::{Internable, Interned};
 
-use crate::common::*;
-use crate::{Config, Database, Index, Linker};
+use crate::*;
 
 /// Default entry point symbol name.
 pub const DEFAULT_ENTRY: &str = "_main";
@@ -41,7 +40,7 @@ pub(crate) struct EntryMetadata {
 pub(crate) struct Context<'db, E: SizedEntry> {
     pub(crate) target: Target,
     pub(crate) db: &'db mut Database,
-    pub(crate) index: &'db Index,
+    pub(crate) symbols: &'db SymbolDb,
     pub(crate) config: &'db Config,
 
     current_offset: u64,
@@ -54,7 +53,7 @@ impl<'db, E: SizedEntry> Context<'db, E> {
         Self {
             target: linker.target,
             db: &mut linker.db,
-            index: &linker.index,
+            symbols: &linker.symbols,
             config: &linker.config,
             current_offset: 0,
             entries: IndexMap::new(),
@@ -84,7 +83,7 @@ impl<'db, E: SizedEntry> Context<'db, E> {
 
     /// Gets a set of all required library IDs.
     pub(crate) fn required_library_ids(&self) -> IndexSet<LibraryId> {
-        let mut library_ids: IndexSet<_> = self.index.dynamic_symbols.values().copied().collect();
+        let mut library_ids: IndexSet<_> = self.symbols.dynamic().map(|(_name, lib_id)| lib_id).collect();
 
         for required_lib in self.db.frameworks.values().filter(|lib| lib.force_load) {
             library_ids.insert(required_lib.id);

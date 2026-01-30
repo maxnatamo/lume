@@ -22,8 +22,8 @@ pub const PAGE_ZERO_SIZE_64: u64 = 0x0000_0001_0000_0000;
 pub const PAGE_ZERO_SIZE_32: u64 = 0x0000_0000_0000_1000;
 
 pub(crate) fn write<W: Writer>(ctx: Context<'_, Entry>, writer: &mut W) -> Result<()> {
-    let entrypoint = ctx.config.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
-    let Some(entrypoint_symbol_id) = ctx.index.symbol_with_name(entrypoint) else {
+    let entrypoint = ctx.config.entry.as_deref().unwrap_or(DEFAULT_ENTRY).to_string();
+    let Some(entrypoint_symbol_id) = ctx.symbols.global_symbol(entrypoint.intern()) else {
         return Err(SimpleDiagnostic::new(format!("could not find symbol {entrypoint}")).into());
     };
 
@@ -173,18 +173,18 @@ impl SizedEntry for Entry {
             }
             Entry::SectionData(section_id) => ctx.db.size_of_section(*section_id),
             Entry::SymbolTable => {
-                let nsyms = ctx.index.symbols.len() as u64;
+                let nsyms = ctx.symbols.count() as u64;
                 nsyms * size_of::<macho::Nlist64<NE>>() as u64
             }
             Entry::StringTable => {
                 // First entry is a single space, used as a null string
                 let mut strsize = 2_u64;
 
-                for symbol_name in ctx.index.symbols.keys() {
+                for symbol_name in ctx.symbols.iter_names() {
                     strsize += symbol_name.len() as u64 + 1;
                 }
 
-                for symbol_name in ctx.index.dynamic_symbols.keys() {
+                for (symbol_name, _library_id) in ctx.symbols.dynamic() {
                     strsize += symbol_name.len() as u64 + 1;
                 }
 
@@ -322,7 +322,7 @@ struct Symbol {
 }
 
 fn merge_strings(ctx: &Context<'_, Entry>) -> StringTable {
-    let string_capacity = 1 + ctx.index.symbols.len() + ctx.index.dynamic_symbols.len();
+    let string_capacity = 1 + ctx.symbols.count();
 
     let mut strings = IndexMap::with_capacity(string_capacity);
     let mut total_size = 0;
@@ -331,13 +331,8 @@ fn merge_strings(ctx: &Context<'_, Entry>) -> StringTable {
     strings.insert(String::from(" ").intern(), 0);
     total_size += 2;
 
-    for symbol_name in ctx.index.symbols.keys() {
-        strings.insert(symbol_name.intern(), total_size);
-        total_size += symbol_name.len() as u64 + 1;
-    }
-
-    for symbol_name in ctx.index.dynamic_symbols.keys() {
-        strings.insert(symbol_name.intern(), total_size);
+    for symbol_name in ctx.symbols.iter_names() {
+        strings.insert(symbol_name, total_size);
         total_size += symbol_name.len() as u64 + 1;
     }
 
@@ -362,7 +357,7 @@ where
 
         match linkage {
             Linkage::Local => 0,
-            Linkage::Global => 1,
+            Linkage::Global { .. } => 1,
             Linkage::External => 2,
         }
     });
@@ -371,7 +366,7 @@ where
 }
 
 fn define_symbols(ctx: &Context<'_, Entry>) -> SymbolTable {
-    let sorted_symbols = sort_symbols(ctx, ctx.index.symbols.values().copied());
+    let sorted_symbols = sort_symbols(ctx, ctx.symbols.iter_ids());
 
     let nlist_size = if ctx.target.is_64bit() {
         size_of::<macho::Nlist64<NE>>() as u64
@@ -379,7 +374,7 @@ fn define_symbols(ctx: &Context<'_, Entry>) -> SymbolTable {
         size_of::<macho::Nlist32<NE>>() as u64
     };
 
-    let mut symbols = Vec::with_capacity(ctx.index.symbols.len());
+    let mut symbols = Vec::with_capacity(ctx.symbols.count());
     let mut total_size = 0;
 
     for symbol_id in sorted_symbols {
@@ -387,7 +382,7 @@ fn define_symbols(ctx: &Context<'_, Entry>) -> SymbolTable {
 
         let ntype = match symbol.linkage {
             crate::Linkage::External => macho::N_UNDF | macho::N_EXT,
-            crate::Linkage::Global => macho::N_SECT | macho::N_EXT,
+            crate::Linkage::Global { .. } => macho::N_SECT | macho::N_EXT,
             crate::Linkage::Local => macho::N_SECT,
         };
 
@@ -406,7 +401,7 @@ fn define_symbols(ctx: &Context<'_, Entry>) -> SymbolTable {
 
         let ndesc = match symbol.linkage {
             crate::Linkage::External => macho::REFERENCE_FLAG_UNDEFINED_NON_LAZY,
-            crate::Linkage::Global | crate::Linkage::Local => macho::REFERENCE_FLAG_DEFINED,
+            crate::Linkage::Global { .. } | crate::Linkage::Local => macho::REFERENCE_FLAG_DEFINED,
         };
 
         symbols.push(Symbol {

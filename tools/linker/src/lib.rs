@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use indexmap::{IndexMap, IndexSet};
-use lume_errors::Result;
+use lume_errors::{DiagCtxHandle, Result};
 
 pub(crate) mod common;
 pub(crate) use common::*;
@@ -12,13 +12,13 @@ pub(crate) use input::*;
 pub(crate) mod layout;
 pub(crate) use layout::*;
 
-pub(crate) mod index;
-pub(crate) use crate::index::Index;
-
 pub mod library;
 pub(crate) mod macho;
 pub(crate) mod native;
+pub(crate) mod symbol_db;
 pub(crate) mod write;
+
+pub(crate) use crate::symbol_db::{SymbolDb, create_symbol_db};
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -38,7 +38,7 @@ pub struct Config {
     pub print_entries: bool,
 }
 
-pub fn link<I>(config: Config, input_files: I) -> Result<Box<[u8]>>
+pub fn link<I>(config: Config, input_files: I, dcx: &DiagCtxHandle) -> Result<Box<[u8]>>
 where
     I: IntoIterator<Item = PathBuf>,
 {
@@ -55,19 +55,22 @@ where
         format: parsed_inputs.objects.values().next().unwrap().format,
     };
 
+    let db = Database {
+        files: read_inputs,
+        objects: parsed_inputs.objects,
+        frameworks: parsed_inputs.frameworks,
+        ..Database::default()
+    };
+
+    let symbol_db = create_symbol_db(&db, dcx)?;
+
     let mut linker = Linker {
         config,
         target,
-        db: Database {
-            files: read_inputs,
-            objects: parsed_inputs.objects,
-            frameworks: parsed_inputs.frameworks,
-            ..Database::default()
-        },
-        index: Index::default(),
+        db,
+        symbols: symbol_db,
     };
 
-    linker.index_symbols()?;
     linker.merge_sections();
 
     let mut writer = write::MemoryWriter::new();
@@ -79,13 +82,43 @@ where
 struct Linker {
     config: Config,
     target: Target,
-    index: Index,
+    symbols: SymbolDb,
     db: Database,
 }
 
 impl Linker {
-    pub fn db(&self) -> &Database {
-        &self.db
+    /// Merge all sections with the same section names into single sections.
+    pub fn merge_sections(&mut self) {
+        let mut segments = IndexMap::<String, IndexSet<OutputSectionId>>::new();
+        let mut sections = IndexMap::<OutputSectionId, OutputSection>::new();
+
+        for input_section in self.db.input_sections() {
+            let id = OutputSectionId::from_name(input_section.segment.as_deref(), &input_section.name);
+
+            if let Some(segment_name) = input_section.segment.clone() {
+                segments.entry(segment_name).or_default().insert(id);
+            }
+
+            let output_section = sections.entry(id).or_insert_with(|| OutputSection {
+                id,
+                name: SectionName {
+                    segment: input_section.segment.clone(),
+                    section: input_section.name.clone(),
+                },
+                placement: input_section.placement,
+                size: 0,
+                alignment: 0,
+                kind: input_section.kind,
+                merged_from: IndexSet::new(),
+            });
+
+            output_section.size += input_section.data.len() as u64;
+            output_section.alignment = output_section.alignment.max(input_section.alignment);
+            output_section.merged_from.insert(input_section.id);
+        }
+
+        self.db.output_segments = segments;
+        self.db.output_sections = sections;
     }
 }
 
