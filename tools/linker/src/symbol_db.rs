@@ -154,13 +154,15 @@ impl SymbolDbBuilder {
                     continue;
                 }
 
-                let original_symbol_id = *symbols.first().unwrap();
+                let mut symbol_iter = symbols.iter();
+
+                let original_symbol_id = *symbol_iter.next().unwrap();
                 let original_symbol_path = db.object_path(original_symbol_id.object);
 
                 let mut diagnostic = diagnostic!("duplicate symbol {name}")
                     .with_help(format!("originally declared here: {original_symbol_path}"));
 
-                for (idx, symbol) in symbols.iter().enumerate() {
+                for (idx, symbol) in symbol_iter.enumerate() {
                     let symbol_path = db.object_path(symbol.object);
                     diagnostic = diagnostic.with_help(format!("  but also declared here: {symbol_path}"));
 
