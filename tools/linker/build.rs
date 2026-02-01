@@ -18,7 +18,15 @@ fn main() {
         println!("cargo::rerun-if-changed={}", source_file_path.display());
 
         let mut object_file_path = source_file_path.clone();
-        object_file_path.set_extension("o");
+
+        #[cfg(target_os = "macos")]
+        object_file_path.set_extension("macho.o");
+
+        #[cfg(target_os = "linux")]
+        object_file_path.set_extension("elf.o");
+
+        #[cfg(target_os = "windows")]
+        object_file_path.set_extension("pe.o");
 
         for object_path in cc::Build::new().file(source_file_path).compile_intermediates() {
             std::fs::copy(object_path, &object_file_path).unwrap();
