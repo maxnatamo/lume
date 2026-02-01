@@ -167,6 +167,7 @@ pub struct InputSection {
     pub data: Vec<u8>,
 
     pub kind: SectionKind,
+    pub flags: SectionFlags,
     pub relocations: Vec<Relocation>,
 }
 
@@ -193,7 +194,11 @@ pub struct Symbol {
     pub name: SymbolName,
     pub address: SymbolAddress,
     pub size: usize,
+    pub weak: bool,
+
     pub linkage: Linkage,
+    pub visibility: SymbolVisibility,
+
     pub section: Option<InputSectionId>,
 }
 
@@ -230,6 +235,14 @@ impl SymbolName {
     }
 }
 
+#[derive(Default, Debug, Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SymbolVisibility {
+    #[default]
+    Default,
+    Protected,
+    Hidden,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolAddress {
     /// The symbol address is invalid or otherwise unknown, given the input
@@ -250,7 +263,7 @@ pub enum SymbolAddress {
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
 pub enum Linkage {
     External,
-    Global { weak: bool },
+    Global,
     Local,
 }
 
@@ -264,9 +277,18 @@ pub struct Relocation {
 
 #[derive(Debug, Clone)]
 pub enum RelocationTarget {
+    /// The relocation points to an absolute address, set by
+    /// [`Relocation::address`].
     Absolute,
+
+    /// The relocation points to the address of the given symbol.
     Symbol(SymbolId),
-    Section(InputSectionId),
+
+    /// The relocation points to the address of the given input section.
+    InputSection(InputSectionId),
+
+    /// The relocation points to the address of the given output section.
+    OutputSection(OutputSectionId),
 }
 
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +309,8 @@ pub struct OutputSection {
     pub size: u64,
     pub alignment: usize,
     pub kind: SectionKind,
+
+    pub flags: SectionFlags,
 
     /// Defines the IDs of the sections which have been merged into this
     /// output section.
@@ -328,4 +352,20 @@ pub enum SectionKind {
 
     /// Metadata alias section for Lume programs.
     LumeAliases,
+}
+
+bitflags::bitflags! {
+    #[derive(Hash, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct SectionFlags: u32 {
+        const None = 0;
+
+        /// Section is writable.
+        const Writable = 1 << 1;
+
+        /// Section is executable.
+        const Executable = 1 << 2;
+
+        /// Section occupies memory during execution.
+        const Allocate = 1 << 3;
+    }
 }

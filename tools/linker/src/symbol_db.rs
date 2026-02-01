@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicBool;
+use std::sync::LazyLock;
 
 use indexmap::{IndexMap, IndexSet};
 use lume_errors::{DiagCtxHandle, diagnostic};
@@ -6,20 +6,100 @@ use lume_span::{Internable, Interned};
 
 use crate::*;
 
-pub(crate) fn create_symbol_db(db: &Database, dcx: &DiagCtxHandle) -> Result<SymbolDb> {
-    let mut builder = SymbolDbBuilder::new();
+pub(crate) fn index_symbols(db: &Database, dcx: &DiagCtxHandle) -> Result<SymbolDb> {
+    let mut builder = SymbolDbBuilder::default();
+    builder.add_symbols_from(db);
 
-    for symbol in db.symbols() {
-        builder.add(symbol);
+    let mut errors = Vec::new();
+    let mut resolved_locals: IndexMap<LocalSymbolKey, SymbolId> = IndexMap::new();
+    let mut resolved_globals: IndexMap<Interned<String>, SymbolId> = IndexMap::new();
+
+    for (&(symbol_name, _symbol_visibility), symbol_id_set) in &builder.duplicates {
+        if symbol_id_set.len() <= 1 {
+            continue;
+        }
+
+        let mut symbol_iter = symbol_id_set.iter();
+
+        let original_symbol_id = *symbol_iter.next().unwrap();
+        let original_symbol_path = db.object_path(original_symbol_id.object);
+
+        let mut diagnostic = diagnostic!("duplicate symbol {symbol_name}")
+            .with_help(format!("originally declared here: {original_symbol_path}"));
+
+        for (idx, symbol) in symbol_iter.enumerate() {
+            let symbol_path = db.object_path(symbol.object);
+            diagnostic = diagnostic.with_help(format!("  but also declared here: {symbol_path}"));
+
+            if idx > 5 {
+                diagnostic = diagnostic.with_help(format!("as well as {} other places", symbol_id_set.len() - idx + 1));
+                break;
+            }
+        }
+
+        errors.push(diagnostic);
     }
 
-    for framework in db.frameworks.values() {
-        for symbol in &framework.symbols {
-            builder.add_dynamic(symbol.intern(), framework.id);
+    // Resolve all referenced symbols first
+    for (&bucket_key, bucket) in &builder.buckets {
+        let (BucketKey::WeakReference { object } | BucketKey::StrongReference { object }) = bucket_key else {
+            continue;
+        };
+
+        let is_weak_reference = matches!(bucket_key, BucketKey::WeakReference { .. });
+
+        for referenced_name in bucket.names() {
+            let Some(symbol_id) = builder.find_local_or_global(referenced_name, object) else {
+                if is_weak_reference {
+                    // Weak references are allowed to be unresolved
+                    continue;
+                }
+
+                errors.push(
+                    diagnostic!("undefined symbol {referenced_name}")
+                        .with_help(format!("referenced in object: {}", db.object_path(object))),
+                );
+
+                continue;
+            };
+
+            if db.symbol(symbol_id).unwrap().linkage == Linkage::Global {
+                resolved_globals.insert(referenced_name, symbol_id);
+            } else {
+                resolved_locals.insert(
+                    LocalSymbolKey {
+                        object,
+                        name: referenced_name,
+                    },
+                    symbol_id,
+                );
+            }
         }
     }
 
-    builder.finalize(db, dcx)
+    // Ensure that all global symbols are resolved as well, since they are not
+    // guaranteed to be referenced (such as entrypoint symbols).
+    if let Some(global_bucket) = builder.bucket(BucketKey::StrongGlobal) {
+        for symbol_name in global_bucket.names() {
+            let symbol_id = builder
+                .find_global(symbol_name)
+                .expect("globals entry must have non-empty entry");
+
+            // TODO: should this be overwritten or kept the same?
+            resolved_globals.insert(symbol_name, symbol_id);
+        }
+    }
+
+    if !errors.is_empty() {
+        dcx.emit_and_push(diagnostic!("failed to resolve symbols").add_causes(errors).into());
+        dcx.ensure_untainted()?;
+    }
+
+    Ok(SymbolDb {
+        dynamic: builder.dynamic,
+        locals: resolved_locals,
+        globals: resolved_globals,
+    })
 }
 
 #[derive(Hash, Debug, Clone, Copy, Eq, PartialEq)]
@@ -28,240 +108,140 @@ struct LocalSymbolKey {
     pub name: Interned<String>,
 }
 
-#[derive(Default)]
-pub(crate) struct SymbolDbBuilder {
-    references: IndexMap<ObjectId, IndexSet<Interned<String>>>,
+#[derive(Hash, Debug, Clone, Copy, Eq, PartialEq)]
+enum BucketKey {
+    /// Bucket is limited to local symbols, which are defined within the given
+    /// object.
+    Local { object: ObjectId },
 
-    locals: IndexMap<LocalSymbolKey, IndexSet<SymbolId>>,
-    globals: IndexMap<Interned<String>, IndexSet<SymbolId>>,
-    weak_globals: IndexMap<Interned<String>, IndexSet<SymbolId>>,
-    dynamic: IndexMap<Interned<String>, LibraryId>,
+    /// Bucket is limited to non-weak global symbols.
+    StrongGlobal,
 
-    finalized: AtomicBool,
+    /// Bucket is limited to weak global symbols.
+    WeakGlobal,
+
+    /// Bucket is limited to non-weak external symbol references within the
+    /// given object.
+    StrongReference { object: ObjectId },
+
+    /// Bucket is limited to weak external symbol references within the given
+    /// object.
+    WeakReference { object: ObjectId },
 }
 
-impl SymbolDbBuilder {
-    pub fn new() -> Self {
-        SymbolDbBuilder::default()
-    }
+#[derive(Default)]
+struct Bucket {
+    map: IndexMap<Interned<String>, IndexSet<SymbolId>>,
+    visibility: IndexMap<SymbolId, SymbolVisibility>,
+}
 
-    /// Adds the given symbol to the database.
-    pub fn add(&mut self, symbol: &Symbol) {
-        let object = symbol.object;
+impl Bucket {
+    pub fn add_symbol(&mut self, symbol: &Symbol) {
         let name = symbol.name.base();
 
-        match symbol.linkage {
-            Linkage::Local => {
-                let key = LocalSymbolKey { object, name };
-                self.locals.entry(key).or_default().insert(symbol.id);
-            }
-            Linkage::Global { weak } => {
-                if weak {
-                    self.weak_globals.entry(name).or_default().insert(symbol.id);
-                } else {
-                    self.globals.entry(name).or_default().insert(symbol.id);
-                }
-            }
-            Linkage::External => {
-                self.references.entry(object).or_default().insert(name);
-            }
-        }
+        self.map.entry(name).or_default().insert(symbol.id);
+        self.visibility.insert(symbol.id, symbol.visibility);
     }
 
-    /// Adds the given dynamic symbol to the database.
-    pub fn add_dynamic(&mut self, symbol: Interned<String>, library: LibraryId) {
-        self.dynamic.insert(symbol, library);
+    pub fn names(&self) -> impl Iterator<Item = Interned<String>> {
+        self.map.keys().copied()
+    }
+
+    pub fn find(&self, symbol: Interned<String>) -> Option<SymbolId> {
+        static EMPTY: LazyLock<IndexSet<SymbolId>> = LazyLock::new(IndexSet::new);
+
+        let candidates = self.map.get(&symbol).unwrap_or(&EMPTY);
+
+        for visibility in &[
+            SymbolVisibility::Default,
+            SymbolVisibility::Protected,
+            SymbolVisibility::Hidden,
+        ] {
+            if let Some(id) = candidates
+                .iter()
+                .find(|&id| self.visibility.get(id) == Some(visibility))
+            {
+                return Some(*id);
+            }
+        }
+
+        None
     }
 }
 
-impl SymbolDbBuilder {
-    /// Marks the symbol database as finalized and returns the finalized symbol
-    /// database.
-    ///
-    /// After the database is finalized, no more symbols can be added to it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the symbol database is already finalized.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Err`] if multiple non-weak global symbols are defined with the
-    /// same name or if a referenced symbol is left undefined.
-    pub fn finalize(mut self, db: &Database, dcx: &DiagCtxHandle) -> Result<SymbolDb> {
-        assert!(
-            !self.finalized.swap(true, std::sync::atomic::Ordering::Relaxed),
-            "bug!: symbol database is already finalized"
-        );
+impl Symbol {
+    fn bucket_key(&self) -> BucketKey {
+        match self.linkage {
+            Linkage::Local => BucketKey::Local { object: self.object },
 
-        self.assert_all_defined(db, dcx);
-        self.assert_no_duplicates(db, dcx);
-        self.remove_unused_symbols();
+            Linkage::External if self.weak => BucketKey::WeakReference { object: self.object },
+            Linkage::External => BucketKey::StrongReference { object: self.object },
 
-        self.finalized.store(true, std::sync::atomic::Ordering::Relaxed);
-        dcx.ensure_untainted()?;
-
-        let mut symdb = SymbolDb {
-            dynamic: self.dynamic,
-            ..SymbolDb::default()
-        };
-
-        for (symbol_key, symbols) in self.locals {
-            let symbol_id = *symbols.first().expect("local symbol must be resolved");
-            symdb.locals.insert(symbol_key, symbol_id);
+            Linkage::Global if self.weak => BucketKey::WeakGlobal,
+            Linkage::Global => BucketKey::StrongGlobal,
         }
-
-        for (symbol_name, symbols) in self.globals {
-            let symbol_id = *symbols.first().expect("global symbol must be resolved");
-            symdb.globals.insert(symbol_name, symbol_id);
-        }
-
-        for (symbol_name, symbols) in self.weak_globals {
-            let symbol_id = *symbols.first().expect("weak global symbol must be resolved");
-            symdb.weak_globals.insert(symbol_name, symbol_id);
-        }
-
-        Ok(symdb)
-    }
-
-    /// Asserts that all referenced symbols are defined.
-    fn assert_all_defined(&self, db: &Database, dcx: &DiagCtxHandle) {
-        for (object_id, references) in &self.references {
-            let object_path = db.object_path(*object_id);
-
-            for reference in references {
-                let mut matches = self.symbol_within_or_global(*reference, *object_id);
-
-                if matches.next().is_none() {
-                    dcx.emit_and_push(
-                        diagnostic!("undefined symbol {reference}")
-                            .with_help(format!("referenced in object: {object_path}"))
-                            .into(),
-                    );
-                }
-            }
-        }
-    }
-
-    /// Asserts that no duplicate symbols are defined.
-    fn assert_no_duplicates(&self, db: &Database, dcx: &DiagCtxHandle) {
-        fn assert_within<'set, I>(iter: I, db: &Database, dcx: &DiagCtxHandle)
-        where
-            I: Iterator<Item = (Interned<String>, &'set IndexSet<SymbolId>)>,
-        {
-            for (name, symbols) in iter {
-                if symbols.len() <= 1 {
-                    continue;
-                }
-
-                let mut symbol_iter = symbols.iter();
-
-                let original_symbol_id = *symbol_iter.next().unwrap();
-                let original_symbol_path = db.object_path(original_symbol_id.object);
-
-                let mut diagnostic = diagnostic!("duplicate symbol {name}")
-                    .with_help(format!("originally declared here: {original_symbol_path}"));
-
-                for (idx, symbol) in symbol_iter.enumerate() {
-                    let symbol_path = db.object_path(symbol.object);
-                    diagnostic = diagnostic.with_help(format!("  but also declared here: {symbol_path}"));
-
-                    if idx > 5 {
-                        diagnostic =
-                            diagnostic.with_help(format!("as well as {} other places", symbols.len() - idx + 1));
-                        break;
-                    }
-                }
-
-                dcx.emit_and_push(diagnostic.into());
-            }
-        }
-
-        assert_within(self.globals.iter().map(|(name, refs)| (*name, refs)), db, dcx);
-        assert_within(self.locals.iter().map(|(name, refs)| (name.name, refs)), db, dcx);
-    }
-
-    /// Removes all symbols from the database which aren't referenced.
-    fn remove_unused_symbols(&mut self) {
-        let all_referenced = self
-            .references
-            .values()
-            .flatten()
-            .copied()
-            .collect::<IndexSet<Interned<String>>>();
-
-        self.dynamic.retain(|key, _lib| all_referenced.contains(key));
-        self.globals.retain(|key, _syms| all_referenced.contains(key));
-        self.weak_globals
-            .retain(|key, _syms| self.globals.contains_key(key) || all_referenced.contains(key));
-
-        self.globals.values_mut().for_each(|syms| {
-            syms.drain(1..);
-        });
-
-        self.weak_globals.values_mut().for_each(|syms| {
-            syms.drain(1..);
-        });
-    }
-
-    fn ensure_finalized(&self) {
-        assert!(
-            self.finalized.load(std::sync::atomic::Ordering::Relaxed),
-            "bug!: symbol database has not been finalized"
-        );
     }
 }
 
+#[derive(Default)]
+struct SymbolDbBuilder {
+    buckets: IndexMap<BucketKey, Bucket>,
+    dynamic: IndexMap<Interned<String>, LibraryId>,
+
+    duplicates: IndexMap<(Interned<String>, SymbolVisibility), IndexSet<SymbolId>>,
+}
+
 impl SymbolDbBuilder {
-    //// Returns an iterator of all symbols named `symbol`, which are defined within
-    //// the object `obj`.
-    pub fn symbol_within(&self, symbol: Interned<String>, obj: ObjectId) -> impl Iterator<Item = SymbolId> {
-        static EMPTY: &indexmap::set::Slice<SymbolId> = indexmap::set::Slice::<SymbolId>::new();
+    pub fn add_symbols_from(&mut self, db: &Database) {
+        for symbol in db.symbols() {
+            self.add_symbol(symbol);
+        }
 
-        self.ensure_finalized();
+        for framework in db.frameworks.values() {
+            for symbol in &framework.symbols {
+                self.add_dynamic_symbol(symbol.intern(), framework.id);
+            }
+        }
+    }
 
-        self.locals
-            .get(&LocalSymbolKey {
-                object: obj,
-                name: symbol,
+    pub fn bucket(&self, key: BucketKey) -> Option<&Bucket> {
+        self.buckets.get(&key)
+    }
+
+    pub fn ensure_bucket(&mut self, key: BucketKey) -> &mut Bucket {
+        self.buckets.entry(key).or_default()
+    }
+
+    pub fn add_symbol(&mut self, symbol: &Symbol) {
+        if symbol.linkage == Linkage::Global && !symbol.weak {
+            let key = (symbol.name.base(), symbol.visibility);
+
+            self.duplicates.entry(key).or_default().insert(symbol.id);
+        }
+
+        self.ensure_bucket(symbol.bucket_key()).add_symbol(symbol);
+    }
+
+    pub fn add_dynamic_symbol(&mut self, name: Interned<String>, library: LibraryId) {
+        self.dynamic.insert(name, library);
+    }
+
+    pub fn find_local(&self, symbol: Interned<String>, within: ObjectId) -> Option<SymbolId> {
+        self.bucket(BucketKey::Local { object: within })
+            .and_then(|bucket| bucket.find(symbol))
+    }
+
+    pub fn find_global(&self, symbol: Interned<String>) -> Option<SymbolId> {
+        self.bucket(BucketKey::StrongGlobal)
+            .and_then(|bucket| bucket.find(symbol))
+            .or_else(|| {
+                self.bucket(BucketKey::WeakGlobal)
+                    .and_then(|bucket| bucket.find(symbol))
             })
-            .map_or(EMPTY, |set| set.as_slice())
-            .iter()
-            .copied()
     }
 
-    //// Returns an iterator of all symbols named `symbol` which are defined as
-    //// globals. Weak symbols are iterated after non-weak symbols.
-    pub fn global_symbols(&self, symbol: Interned<String>) -> impl Iterator<Item = SymbolId> {
-        static EMPTY: &indexmap::set::Slice<SymbolId> = indexmap::set::Slice::<SymbolId>::new();
-
-        self.ensure_finalized();
-
-        let strong = self
-            .globals
-            .get(&symbol)
-            .map_or(EMPTY, |set| set.as_slice())
-            .iter()
-            .copied();
-
-        let weak = self
-            .weak_globals
-            .get(&symbol)
-            .map_or(EMPTY, |set| set.as_slice())
-            .iter()
-            .copied();
-
-        strong.chain(weak)
-    }
-
-    //// Returns an iterator of all symbols named `symbol`, which are defined within
-    //// the object `obj`.
-    ///
-    /// If the local symbols are exhausted, the iterator will yield weak global
-    /// symbols, then non-weak global symbols.
-    pub fn symbol_within_or_global(&self, symbol: Interned<String>, obj: ObjectId) -> impl Iterator<Item = SymbolId> {
-        self.ensure_finalized();
-        self.symbol_within(symbol, obj).chain(self.global_symbols(symbol))
+    pub fn find_local_or_global(&self, symbol: Interned<String>, within: ObjectId) -> Option<SymbolId> {
+        self.find_local(symbol, within).or_else(|| self.find_global(symbol))
     }
 }
 
@@ -269,33 +249,33 @@ impl SymbolDbBuilder {
 pub(crate) struct SymbolDb {
     locals: IndexMap<LocalSymbolKey, SymbolId>,
     globals: IndexMap<Interned<String>, SymbolId>,
-    weak_globals: IndexMap<Interned<String>, SymbolId>,
     dynamic: IndexMap<Interned<String>, LibraryId>,
 }
 
 impl SymbolDb {
     //// Gets the count of all symbols in the database.
+    ///
+    /// Note: dynamic symbols are not included in this count.
     pub fn count(&self) -> usize {
-        self.locals.len() + self.globals.len() + self.weak_globals.len() + self.dynamic.len()
+        self.locals.len() + self.globals.len()
     }
 
     //// Iterates over all symbol IDs within the database.
+    ///
+    /// Note: since dynamic symbols aren't resolved at link time, they are not
+    /// included in this iterator.
     pub fn iter_ids(&self) -> impl Iterator<Item = SymbolId> {
-        self.locals
-            .values()
-            .copied()
-            .chain(self.globals.values().copied())
-            .chain(self.weak_globals.values().copied())
+        self.locals.values().copied().chain(self.globals.values().copied())
     }
 
     //// Iterates over all symbol names within the database.
+    ///
+    /// Note: dynamic symbols are not included in this iterator.
     pub fn iter_names(&self) -> impl Iterator<Item = Interned<String>> {
         self.locals
             .keys()
             .map(|key| key.name)
             .chain(self.globals.keys().copied())
-            .chain(self.weak_globals.keys().copied())
-            .chain(self.dynamic.keys().copied())
     }
 
     //// Iterates over all dynamic symbols within the database.
@@ -307,7 +287,8 @@ impl SymbolDb {
 
     //// Returns the symbol named `symbol`, which is defined within the object
     //// `obj`.
-    pub fn symbol_within(&self, symbol: Interned<String>, obj: ObjectId) -> Option<SymbolId> {
+    #[inline]
+    pub fn local_symbol(&self, symbol: Interned<String>, obj: ObjectId) -> Option<SymbolId> {
         self.locals
             .get(&LocalSymbolKey {
                 object: obj,
@@ -318,24 +299,8 @@ impl SymbolDb {
 
     //// Returns the symbol named `symbol` which is defined as globals. Weak symbols
     //// are checked after non-weak symbols.
+    #[inline]
     pub fn global_symbol(&self, symbol: Interned<String>) -> Option<SymbolId> {
-        if let Some(symbol_id) = self.globals.get(&symbol).copied() {
-            return Some(symbol_id);
-        };
-
-        if let Some(symbol_id) = self.weak_globals.get(&symbol).copied() {
-            return Some(symbol_id);
-        };
-
-        None
-    }
-
-    //// Returns the symbol named `symbol`, which is defined within the object
-    //// `obj`.
-    ///
-    /// If no matching local symbol is found, non-weak global symbols are
-    /// queried, then weak global symbols.
-    pub fn symbol_within_or_global(&self, symbol: Interned<String>, obj: ObjectId) -> Option<SymbolId> {
-        self.symbol_within(symbol, obj).or_else(|| self.global_symbol(symbol))
+        self.globals.get(&symbol).copied()
     }
 }

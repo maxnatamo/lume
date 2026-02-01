@@ -290,7 +290,7 @@ fn write_dysymtab_header<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Resu
         let linkage = layout.ctx.db.symbol(symbol.id).unwrap().linkage;
 
         match linkage {
-            Linkage::Local | Linkage::Global { .. } => {
+            Linkage::Local | Linkage::Global => {
                 local_sym_len += 1;
             }
             Linkage::External => {

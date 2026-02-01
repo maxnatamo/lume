@@ -238,6 +238,26 @@ where
         let data = obj_section.data().unwrap().to_vec();
         let kind = section_kind_from(&obj_section);
 
+        let mut section_flags = SectionFlags::empty();
+
+        match obj_section.flags() {
+            object::SectionFlags::Elf { sh_flags } => {
+                if sh_flags & u64::from(object::elf::SHF_ALLOC) != 0 {
+                    section_flags |= SectionFlags::Allocate;
+                }
+
+                if sh_flags & u64::from(object::elf::SHF_WRITE) != 0 {
+                    section_flags |= SectionFlags::Writable;
+                }
+
+                if sh_flags & u64::from(object::elf::SHF_EXECINSTR) != 0 {
+                    section_flags |= SectionFlags::Executable;
+                }
+            }
+            object::SectionFlags::MachO { .. } => {}
+            _ => unreachable!(),
+        }
+
         let id = InputSectionId::from_name(object_id, segment_name, section_name);
         section_mapping.insert(obj_section.index(), id);
 
@@ -249,6 +269,7 @@ where
             data,
             alignment: usize::try_from(alignment).unwrap(),
             kind,
+            flags: section_flags,
             relocations: Vec::new(),
         });
     }
@@ -267,17 +288,21 @@ where
             .section_index()
             .map(|idx| *section_mapping.get(&idx).unwrap());
 
-        let linkage = if obj_symbol.is_undefined() {
-            Linkage::External
-        } else if obj_symbol.is_global() {
-            Linkage::Global {
-                weak: obj_symbol.is_weak(),
+        let visibility = match obj_symbol.flags() {
+            object::SymbolFlags::Elf { st_other, .. } => {
+                if st_other & object::elf::STV_HIDDEN != 0 {
+                    SymbolVisibility::Hidden
+                } else if st_other & object::elf::STV_PROTECTED != 0 {
+                    SymbolVisibility::Protected
+                } else {
+                    SymbolVisibility::Default
+                }
             }
-        } else {
-            Linkage::Local
+            _ => SymbolVisibility::Default,
         };
 
         let id = SymbolId::from_name(object_id, name);
+        let linkage = symbol_linkage(&obj_symbol);
 
         symbol_mapping.insert(obj_symbol.index(), id);
 
@@ -288,6 +313,8 @@ where
             address,
             size: usize::try_from(size).unwrap(),
             linkage,
+            visibility,
+            weak: obj_symbol.is_weak(),
             section,
         });
     }
@@ -303,6 +330,8 @@ where
             address: SymbolAddress::Undefined,
             size: 0,
             linkage: Linkage::External,
+            visibility: SymbolVisibility::Default,
+            weak: false,
             section: None,
         });
     }
@@ -323,7 +352,7 @@ where
                     object::RelocationTarget::Section(id) => {
                         let section_id = *section_mapping.get(&id).unwrap();
 
-                        RelocationTarget::Section(section_id)
+                        RelocationTarget::InputSection(section_id)
                     }
                     _ => unimplemented!(),
                 };
@@ -351,6 +380,26 @@ where
         symbols,
         archive_entry: None,
     })
+}
+
+fn symbol_linkage(obj_symbol: &object::Symbol) -> Linkage {
+    use object::ObjectSymbol as _;
+
+    if obj_symbol.is_undefined() {
+        return Linkage::External;
+    }
+
+    if let object::SymbolFlags::Elf { .. } = obj_symbol.flags()
+        && obj_symbol.name() == Ok("__dso_handle")
+    {
+        return Linkage::Local;
+    }
+
+    if obj_symbol.is_global() {
+        return Linkage::Global;
+    }
+
+    Linkage::Local
 }
 
 /// Determines the kind of section depending on the name and/or declared section

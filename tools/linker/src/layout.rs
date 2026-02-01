@@ -3,6 +3,7 @@ use std::hash::Hash;
 
 use indexmap::{IndexMap, IndexSet};
 use lume_span::{Internable, Interned};
+use regex::Regex;
 
 use crate::*;
 
@@ -173,4 +174,251 @@ pub(crate) fn align_to(addr: u64, align: u64) -> u64 {
 /// address.
 pub(crate) fn page_align(addr: u64) -> u64 {
     align_to(addr, crate::native::page_size())
+}
+
+#[derive(Debug, Clone)]
+pub struct Layout {
+    pub(crate) target: Target,
+
+    pub(crate) order: Vec<Ordering>,
+    pub(crate) boundaries: Vec<Boundary>,
+}
+
+impl Layout {
+    pub fn default_layout(target: Target) -> Self {
+        let order = match target.format {
+            ObjectFormat::Elf => {
+                vec![
+                    Ordering::section(".rela.plt", NameMatcher::literal(".rela.plt")),
+                    Ordering::section(".rela.plt", NameMatcher::literal(".rela.iplt")),
+                    Ordering::section(".text", NameMatcher::literal(".text")),
+                    Ordering::section(".text", NameMatcher::regex(r"^\.text.*")),
+                    Ordering::section(".fini", NameMatcher::literal(".fini")),
+                    Ordering::section(".rodata", NameMatcher::literal(".rodata")),
+                    Ordering::section(".rodata", NameMatcher::regex(r"^\.rodata.*")),
+                    Ordering::section(".preinit_array", NameMatcher::literal(".preinit_array")),
+                    Ordering::section(".init_array", NameMatcher::literal(".init_array")),
+                    Ordering::section(".fini_array", NameMatcher::literal(".fini_array")),
+                    Ordering::section(".data", NameMatcher::literal(".data")),
+                    Ordering::section(".data", NameMatcher::regex(r"^\.data.*")),
+                    Ordering::section(".bss", NameMatcher::literal(".bss")),
+                    Ordering::section(".bss", NameMatcher::regex(r"^\.bss.*")),
+                    Ordering::Remaining,
+                ]
+            }
+            ObjectFormat::MachO => vec![Ordering::Remaining],
+        };
+
+        let boundaries = match target.format {
+            #[rustfmt::skip]
+            ObjectFormat::Elf => {
+                vec![
+                    Boundary::new("__rela_iplt_start")
+                        .bound_to_start_of(".rela.iplt")
+                        .placed_in(".rela.plt"),
+
+                    Boundary::new("__rela_iplt_end")
+                        .bound_to_end_of(".rela.iplt")
+                        .placed_in(".rela.plt"),
+
+                    Boundary::new("etext")
+                        .bound_to_end_of(".fini")
+                        .placed_in(".text"),
+
+                    Boundary::new("__preinit_array_start")
+                        .bound_to_start_of(".preinit_array")
+                        .placed_in(".preinit_array"),
+
+                    Boundary::new("__preinit_array_end")
+                        .bound_to_end_of(".preinit_array")
+                        .placed_in(".preinit_array"),
+
+                    Boundary::new("__init_array_start")
+                        .bound_to_start_of(".init_array")
+                        .placed_in(".init_array"),
+
+                    Boundary::new("__init_array_end")
+                        .bound_to_end_of(".init_array")
+                        .placed_in(".init_array"),
+
+                    Boundary::new("__fini_array_start")
+                        .bound_to_start_of(".fini_array")
+                        .placed_in(".fini_array"),
+
+                    Boundary::new("__fini_array_end")
+                        .bound_to_end_of(".fini_array")
+                        .placed_in(".fini_array"),
+
+                    Boundary::new("__data_start")
+                        .bound_to_start_of(".data")
+                        .placed_in(".data"),
+
+                    Boundary::new("_edata")
+                        .bound_to_end_of(".data")
+                        .placed_in(".data"),
+
+                    Boundary::new("__bss_start")
+                        .bound_to_start_of(".bss")
+                        .placed_in(".bss"),
+
+                    Boundary::new("__bss_end__")
+                        .bound_to_end_of(".bss")
+                        .placed_in(".bss"),
+
+                    Boundary::new("_end")
+                        .bound_to_end_of_file()
+                        .placed_in(".bss"),
+
+                    Boundary::new("__end__")
+                        .bound_to_end_of_file()
+                        .placed_in(".bss"),
+                ]
+            }
+            ObjectFormat::MachO => Vec::new(),
+        };
+
+        Self {
+            target,
+            order,
+            boundaries,
+        }
+    }
+
+    pub(crate) fn order_of_section(&self, section_name: &str) -> Option<usize> {
+        self.order.iter().position(|order| match order {
+            Ordering::Section { matcher, .. } => matcher.matches(section_name),
+            Ordering::Remaining => true,
+        })
+    }
+
+    pub(crate) fn output_section_of(&self, input_section_name: &str) -> String {
+        self.order
+            .iter()
+            .find_map(|ordering| {
+                if let Ordering::Section { name, matcher } = ordering
+                    && matcher.matches(input_section_name)
+                {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| input_section_name.to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Ordering {
+    /// Defines a merged section with the given name, containing all sections
+    /// that match the given matcher.
+    Section { name: String, matcher: NameMatcher },
+
+    /// Places all remaining sections at the location of the item.
+    Remaining,
+}
+
+impl Ordering {
+    pub fn section<S: Into<String>>(name: S, matcher: NameMatcher) -> Self {
+        Self::Section {
+            name: name.into(),
+            matcher,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum NameMatcher {
+    /// The operand must equal the contained string, case insensitive.
+    Literal(String),
+
+    /// The operand must match the contained regex pattern.
+    Regex(Regex),
+}
+
+impl NameMatcher {
+    /// Creates a new literal matcher.
+    pub fn literal<S: Into<String>>(literal: S) -> Self {
+        Self::Literal(literal.into())
+    }
+
+    /// Creates a new regex matcher.
+    pub fn regex<P: AsRef<str>>(pattern: P) -> Self {
+        Self::Regex(Regex::new(pattern.as_ref()).unwrap())
+    }
+
+    /// Determines whether the given operand matches the matcher.
+    pub fn matches(&self, name: &str) -> bool {
+        match self {
+            NameMatcher::Literal(literal) => literal.eq_ignore_ascii_case(name),
+            NameMatcher::Regex(regex) => regex.is_match(name),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Boundary {
+    /// Name of the boundary symbol.
+    pub symbol_name: String,
+
+    /// Name of the section in which the symbol is placed.
+    pub placed_in: Option<String>,
+
+    /// Name of the section which the boundary symbol references.
+    pub bound_section: Option<String>,
+
+    /// Where the boundary symbol should point to within the section.
+    pub placement: BoundaryPlacement,
+}
+
+impl Boundary {
+    pub fn new<N: Into<String>>(name: N) -> Self {
+        Self {
+            symbol_name: name.into(),
+            bound_section: None,
+            placed_in: None,
+            placement: BoundaryPlacement::Start,
+        }
+    }
+
+    /// Bind the boundary symbol to point to the start of the given section.
+    pub fn bound_to_start_of<S: Into<String>>(mut self, section_name: S) -> Self {
+        self.bound_section = Some(section_name.into());
+        self.placement = BoundaryPlacement::Start;
+        self
+    }
+
+    /// Bind the boundary symbol to point to the end of the given section.
+    pub fn bound_to_end_of<S: Into<String>>(mut self, section_name: S) -> Self {
+        self.bound_section = Some(section_name.into());
+        self.placement = BoundaryPlacement::End;
+        self
+    }
+
+    /// Bind the boundary symbol to point to the end of the file.
+    pub fn bound_to_end_of_file(mut self) -> Self {
+        self.bound_section = None;
+        self.placement = BoundaryPlacement::End;
+        self
+    }
+
+    /// Sets the section in which the boundary symbol should be placed in.
+    ///
+    /// This differs from which section the symbol is bound to:
+    /// - the bound section is used to determine the address of the boundary
+    ///   symbol, whereas
+    /// - the placement section defines which section the symbol itself should
+    ///   be placed in.
+    pub fn placed_in<S: Into<String>>(mut self, section_name: S) -> Self {
+        self.placed_in = Some(section_name.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoundaryPlacement {
+    /// Point to the start of the section.
+    Start,
+
+    /// Point to the end of the section.
+    End,
 }

@@ -17,7 +17,8 @@ impl Layout<'_> {
                     let target_address = match relocation.target {
                         RelocationTarget::Absolute => relocation.address,
                         RelocationTarget::Symbol(symbol_id) => self.vmaddr_of_symbol(symbol_id),
-                        RelocationTarget::Section(section_id) => self.vmaddr_of_unmerged_section(section_id),
+                        RelocationTarget::InputSection(section_id) => self.vmaddr_of_input_section(section_id),
+                        RelocationTarget::OutputSection(section_id) => self.vmaddr_of_output_section(section_id),
                     };
 
                     let target_address = target_address.checked_add_signed(relocation.addend).unwrap_or_else(|| {

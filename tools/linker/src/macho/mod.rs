@@ -184,10 +184,6 @@ impl SizedEntry for Entry {
                     strsize += symbol_name.len() as u64 + 1;
                 }
 
-                for (symbol_name, _library_id) in ctx.symbols.dynamic() {
-                    strsize += symbol_name.len() as u64 + 1;
-                }
-
                 strsize
             }
             Entry::DylibHeader(_library_id, library_name) => {
@@ -332,8 +328,9 @@ fn merge_strings(ctx: &Context<'_, Entry>) -> StringTable {
     total_size += 2;
 
     for symbol_name in ctx.symbols.iter_names() {
-        strings.insert(symbol_name, total_size);
-        total_size += symbol_name.len() as u64 + 1;
+        if strings.insert(symbol_name, total_size).is_none() {
+            total_size += symbol_name.len() as u64 + 1;
+        }
     }
 
     StringTable { strings, total_size }
@@ -357,7 +354,7 @@ where
 
         match linkage {
             Linkage::Local => 0,
-            Linkage::Global { .. } => 1,
+            Linkage::Global => 1,
             Linkage::External => 2,
         }
     });
@@ -382,7 +379,7 @@ fn define_symbols(ctx: &Context<'_, Entry>) -> SymbolTable {
 
         let ntype = match symbol.linkage {
             crate::Linkage::External => macho::N_UNDF | macho::N_EXT,
-            crate::Linkage::Global { .. } => macho::N_SECT | macho::N_EXT,
+            crate::Linkage::Global => macho::N_SECT | macho::N_EXT,
             crate::Linkage::Local => macho::N_SECT,
         };
 
@@ -400,8 +397,9 @@ fn define_symbols(ctx: &Context<'_, Entry>) -> SymbolTable {
             .unwrap_or(0);
 
         let ndesc = match symbol.linkage {
+            crate::Linkage::External if symbol.weak => macho::REFERENCE_FLAG_UNDEFINED_LAZY,
             crate::Linkage::External => macho::REFERENCE_FLAG_UNDEFINED_NON_LAZY,
-            crate::Linkage::Global { .. } | crate::Linkage::Local => macho::REFERENCE_FLAG_DEFINED,
+            crate::Linkage::Global | crate::Linkage::Local => macho::REFERENCE_FLAG_DEFINED,
         };
 
         symbols.push(Symbol {

@@ -197,14 +197,14 @@ impl<'db> Layout<'db> {
                     unreachable!("relative symbols must have parent section");
                 };
 
-                self.vmaddr_of_unmerged_section(section_id) + section_offset
+                self.vmaddr_of_input_section(section_id) + section_offset
             }
         }
     }
 
-    /// Gets the virtual address of the unmerged section with the given ID when
+    /// Gets the virtual address of an input section with the given ID when
     /// loaded into memory.
-    pub fn vmaddr_of_unmerged_section(&self, id: InputSectionId) -> u64 {
+    pub fn vmaddr_of_input_section(&self, id: InputSectionId) -> u64 {
         let (merged_section, nested_idx) = self.ctx.input_section_of(id);
         let segment_name = merged_section.name.segment.clone().unwrap().intern();
 
@@ -227,6 +227,25 @@ impl<'db> Layout<'db> {
         }
 
         section_vaddr
+    }
+
+    /// Gets the virtual address of an output section with the given ID when
+    /// loaded into memory.
+    pub fn vmaddr_of_output_section(&self, id: OutputSectionId) -> u64 {
+        let output_section = self.ctx.db.output_section(id);
+        let segment_name = output_section.name.segment.clone().unwrap().intern();
+
+        let (segment_entry, _metadata) = self
+            .ctx
+            .entries()
+            .get_key_value(&Entry::SegmentHeader(SegmentContent::new(segment_name)))
+            .unwrap();
+
+        let Entry::SegmentHeader(segment_content) = segment_entry else {
+            unreachable!()
+        };
+
+        self.vmaddr_of_section_data(segment_content, output_section.id)
     }
 }
 

@@ -14,11 +14,13 @@ pub(crate) use layout::*;
 
 pub mod library;
 pub(crate) mod macho;
+pub(crate) mod merge;
 pub(crate) mod native;
 pub(crate) mod symbol_db;
 pub(crate) mod write;
 
-pub(crate) use crate::symbol_db::{SymbolDb, create_symbol_db};
+use crate::merge::merge_sections;
+pub(crate) use crate::symbol_db::{SymbolDb, index_symbols};
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -55,23 +57,24 @@ where
         format: parsed_inputs.objects.values().next().unwrap().format,
     };
 
-    let db = Database {
+    let mut db = Database {
         files: read_inputs,
         objects: parsed_inputs.objects,
         frameworks: parsed_inputs.frameworks,
         ..Database::default()
     };
 
-    let symbol_db = create_symbol_db(&db, dcx)?;
+    db.add_dummy_object();
+
+    let layout = Layout::default_layout(target);
+    merge_sections(&mut db, layout);
 
     let mut linker = Linker {
         config,
         target,
+        symbols: index_symbols(&db, dcx)?,
         db,
-        symbols: symbol_db,
     };
-
-    linker.merge_sections();
 
     let mut writer = write::MemoryWriter::new();
     write::write_to(&mut writer, &mut linker)?;
@@ -86,43 +89,6 @@ struct Linker {
     db: Database,
 }
 
-impl Linker {
-    /// Merge all sections with the same section names into single sections.
-    pub fn merge_sections(&mut self) {
-        let mut segments = IndexMap::<String, IndexSet<OutputSectionId>>::new();
-        let mut sections = IndexMap::<OutputSectionId, OutputSection>::new();
-
-        for input_section in self.db.input_sections() {
-            let id = OutputSectionId::from_name(input_section.segment.as_deref(), &input_section.name);
-
-            if let Some(segment_name) = input_section.segment.clone() {
-                segments.entry(segment_name).or_default().insert(id);
-            }
-
-            let output_section = sections.entry(id).or_insert_with(|| OutputSection {
-                id,
-                name: SectionName {
-                    segment: input_section.segment.clone(),
-                    section: input_section.name.clone(),
-                },
-                placement: input_section.placement,
-                size: 0,
-                alignment: 0,
-                kind: input_section.kind,
-                merged_from: IndexSet::new(),
-            });
-
-            output_section.size += input_section.data.len() as u64;
-            output_section.alignment = output_section.alignment.max(input_section.alignment);
-            output_section.merged_from.insert(input_section.id);
-        }
-
-        self.db.output_segments = segments;
-        self.db.output_sections = sections;
-    }
-}
-
-#[derive(Default)]
 struct Database {
     pub files: IndexMap<InputFileId, InputFile>,
     pub objects: IndexMap<ObjectId, ObjectFile>,
@@ -130,9 +96,32 @@ struct Database {
 
     output_segments: IndexMap<String, IndexSet<OutputSectionId>>,
     output_sections: IndexMap<OutputSectionId, OutputSection>,
+
+    dummy_object: ObjectId,
 }
 
 impl Database {
+    fn add_dummy_object(&mut self) {
+        self.files.insert(self.dummy_object.file, InputFile {
+            id: self.dummy_object.file,
+            path: PathBuf::from("<ld-internal>"),
+            format: FileFormat::Unknown,
+            data: Box::new([]),
+        });
+
+        self.objects.insert(self.dummy_object, ObjectFile {
+            id: self.dummy_object,
+            format: ObjectFormat::Elf,
+            archive_entry: None,
+            sections: IndexMap::new(),
+            symbols: IndexMap::new(),
+        });
+    }
+
+    pub fn dummy_object_mut(&mut self) -> &mut ObjectFile {
+        self.objects.get_mut(&self.dummy_object).unwrap()
+    }
+
     pub fn object(&self, id: ObjectId) -> &ObjectFile {
         self.objects.get(&id).unwrap()
     }
@@ -169,6 +158,10 @@ impl Database {
 
     pub fn output_section(&self, id: OutputSectionId) -> &OutputSection {
         self.output_sections.get(&id).unwrap()
+    }
+
+    pub fn output_section_mut(&mut self, id: OutputSectionId) -> &mut OutputSection {
+        self.output_sections.get_mut(&id).unwrap()
     }
 
     pub fn output_sections(&self) -> impl Iterator<Item = &OutputSection> {
@@ -208,5 +201,21 @@ impl Database {
             .map_or(EMPTY, |seg| seg.as_slice())
             .iter()
             .copied()
+    }
+}
+
+impl Default for Database {
+    fn default() -> Self {
+        Database {
+            files: IndexMap::new(),
+            objects: IndexMap::new(),
+            frameworks: IndexMap::new(),
+            output_segments: IndexMap::new(),
+            output_sections: IndexMap::new(),
+            dummy_object: ObjectId {
+                file: InputFileId(usize::MAX),
+                id: 0,
+            },
+        }
     }
 }
