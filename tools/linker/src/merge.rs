@@ -1,3 +1,5 @@
+use lume_span::Internable;
+
 use crate::*;
 
 const POINTER_SIZE: usize = std::mem::size_of::<*const ()>();
@@ -9,7 +11,7 @@ pub fn merge_sections(db: &mut Database, layout: Layout) {
 
     for input_section in db.input_sections() {
         // Determine which output section the input section should be merged into.
-        let output_section_name = layout.output_section_of(&input_section.name);
+        let output_section_name = layout.output_section_of(&input_section.name).intern();
         let output_section_id = OutputSectionId::from_name(input_section.segment.as_deref(), &output_section_name);
 
         let segment_name = input_section.segment.clone().unwrap_or_default();
@@ -18,7 +20,7 @@ pub fn merge_sections(db: &mut Database, layout: Layout) {
         let output_section = sections.entry(output_section_id).or_insert_with(|| OutputSection {
             id: output_section_id,
             name: SectionName {
-                segment: input_section.segment.clone(),
+                segment: input_section.segment.clone().map(|str| str.intern()),
                 section: output_section_name,
             },
             placement: input_section.placement,
@@ -131,7 +133,7 @@ fn add_reserved_symbols(db: &mut Database, layout: &Layout) {
             id,
             name: SectionName {
                 segment: None,
-                section: details.name,
+                section: details.name.intern(),
             },
             placement: None,
             size: 0,
@@ -163,13 +165,13 @@ fn add_boundary_symbols(db: &mut Database, layout: &Layout) {
     for boundary in &layout.boundaries {
         // If the boundary isn't bound to any specific symbol, use either the first or
         // last output section, depending on the alignment of the boundary.
-        let Some(bound_section_name) = boundary.bound_section.clone().or_else(|| {
+        let Some(bound_section_name) = boundary.bound_section.or_else(|| {
             let chosen_output_section = match boundary.placement {
                 BoundaryPlacement::Start => db.output_sections.first(),
                 BoundaryPlacement::End => db.output_sections.last(),
             };
 
-            chosen_output_section.map(|last_section| last_section.1.name.section.clone())
+            chosen_output_section.map(|last_section| last_section.1.name.section)
         }) else {
             continue;
         };
@@ -181,7 +183,7 @@ fn add_boundary_symbols(db: &mut Database, layout: &Layout) {
         let bound_section_id = match db
             .output_sections
             .values()
-            .find(|section| section.name.section == *bound_section_name)
+            .find(|section| section.name.section == bound_section_name)
         {
             Some(bound_section) => bound_section.id,
             None => continue,

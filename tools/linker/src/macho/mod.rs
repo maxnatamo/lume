@@ -10,7 +10,10 @@ use object::{NativeEndian as NE, macho};
 
 use crate::common::*;
 use crate::write::Writer;
-use crate::{Context, DEFAULT_ENTRY, EntryDisplay, SizedEntry, align_to};
+use crate::{Context, EntryDisplay, SizedEntry, align_to};
+
+/// Default entry point symbol name.
+pub const DEFAULT_ENTRY: &str = "_main";
 
 /// Name of the dynamic linker to use.
 const DYLINKER_NAME: &str = "/usr/lib/dyld";

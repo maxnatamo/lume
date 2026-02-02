@@ -13,6 +13,9 @@ pub(crate) mod layout;
 pub(crate) use layout::*;
 
 pub mod library;
+pub use library::search_paths;
+
+pub(crate) mod elf;
 pub(crate) mod macho;
 pub(crate) mod merge;
 pub(crate) mod native;
@@ -55,6 +58,7 @@ where
     let target = Target {
         arch,
         format: parsed_inputs.objects.values().next().unwrap().format,
+        endian: Endianess::default(),
     };
 
     let mut db = Database {

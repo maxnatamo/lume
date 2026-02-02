@@ -206,7 +206,7 @@ impl<'db> Layout<'db> {
     /// loaded into memory.
     pub fn vmaddr_of_input_section(&self, id: InputSectionId) -> u64 {
         let (merged_section, nested_idx) = self.ctx.input_section_of(id);
-        let segment_name = merged_section.name.segment.clone().unwrap().intern();
+        let segment_name = merged_section.name.segment.unwrap();
 
         let (segment_entry, _metadata) = self
             .ctx
@@ -233,7 +233,7 @@ impl<'db> Layout<'db> {
     /// loaded into memory.
     pub fn vmaddr_of_output_section(&self, id: OutputSectionId) -> u64 {
         let output_section = self.ctx.db.output_section(id);
-        let segment_name = output_section.name.segment.clone().unwrap().intern();
+        let segment_name = output_section.name.segment.unwrap();
 
         let (segment_entry, _metadata) = self
             .ctx

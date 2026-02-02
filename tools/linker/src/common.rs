@@ -12,6 +12,7 @@ use crate::*;
 pub struct Target {
     pub arch: Architecture,
     pub format: ObjectFormat,
+    pub endian: Endianess,
 }
 
 impl Target {
@@ -25,6 +26,10 @@ impl Target {
 
     pub fn is_arm(self) -> bool {
         self.arch.is_arm()
+    }
+
+    pub fn is_little_endian(self) -> bool {
+        self.endian == Endianess::Little
     }
 }
 
@@ -58,8 +63,18 @@ impl Architecture {
     }
 }
 
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "constructed per host arch")]
+pub enum Endianess {
+    #[cfg_attr(target_endian = "big", default)]
+    Big,
+
+    #[cfg_attr(target_endian = "little", default)]
+    Little,
+}
+
 /// Unique identifier for an object file.
-#[derive(derive_more::Display, Debug, Hash, Clone, Copy, PartialEq, Eq)]
+#[derive(derive_more::Display, Default, Debug, Hash, Clone, Copy, PartialEq, Eq)]
 #[display("obj-{}-{id}", file.0)]
 pub struct ObjectId {
     /// Defines the ID of the input file, from which the object file was parsed.
@@ -122,10 +137,19 @@ pub struct FrameworkLibrary {
     pub symbols: IndexSet<String>,
 }
 
-#[derive(Hash, Default, Clone, PartialEq, Eq)]
+#[derive(Hash, Clone, PartialEq, Eq)]
 pub struct SectionName {
-    pub segment: Option<String>,
-    pub section: String,
+    pub segment: Option<Interned<String>>,
+    pub section: Interned<String>,
+}
+
+impl Default for SectionName {
+    fn default() -> Self {
+        Self {
+            segment: None,
+            section: String::new().intern(),
+        }
+    }
 }
 
 impl Display for SectionName {
@@ -171,7 +195,7 @@ pub struct InputSection {
     pub relocations: Vec<Relocation>,
 }
 
-#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Hash, Clone, Copy, PartialEq, Eq)]
 pub struct SymbolId {
     pub object: ObjectId,
     pub id: usize,
@@ -291,7 +315,7 @@ pub enum RelocationTarget {
     OutputSection(OutputSectionId),
 }
 
-#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Hash, Clone, Copy, PartialEq, Eq)]
 pub struct OutputSectionId(usize);
 
 impl OutputSectionId {
@@ -345,13 +369,22 @@ pub enum SectionKind {
     ZeroFilled,
 
     /// Section of null-terminated strings.
-    CStrings,
+    StringTable,
+
+    /// Uninitialized data section.
+    UninitializedData,
+
+    /// Read-only data section.
+    ReadOnlyData,
 
     /// Metadata section for Lume programs.
     LumeMetadata,
 
     /// Metadata alias section for Lume programs.
     LumeAliases,
+
+    /// (ELF only) Unhandled ELF section kind.
+    Elf(u32),
 }
 
 bitflags::bitflags! {
@@ -359,13 +392,27 @@ bitflags::bitflags! {
     pub struct SectionFlags: u32 {
         const None = 0;
 
+        /// Section is readable.
+        const Readable = 1 << 1;
+
         /// Section is writable.
-        const Writable = 1 << 1;
+        const Writable = 1 << 2;
 
         /// Section is executable.
-        const Executable = 1 << 2;
+        const Executable = 1 << 3;
 
         /// Section occupies memory during execution.
-        const Allocate = 1 << 3;
+        const Allocate = 1 << 4;
+    }
+}
+
+impl Display for SectionFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", if self.contains(Self::Readable) { "R" } else { " " })?;
+        write!(f, "{}", if self.contains(Self::Writable) { "W" } else { " " })?;
+        write!(f, "{}", if self.contains(Self::Executable) { "X" } else { " " })?;
+        write!(f, "{}", if self.contains(Self::Allocate) { "A" } else { " " })?;
+
+        Ok(())
     }
 }

@@ -214,12 +214,15 @@ fn write_segment_header<W: Writer>(
         writer.write_u32(0)?; // nreloc
 
         let flags = match section.kind {
-            SectionKind::Unknown | SectionKind::Data => macho::S_REGULAR,
+            SectionKind::Unknown | SectionKind::Data | SectionKind::UninitializedData | SectionKind::ReadOnlyData => {
+                macho::S_REGULAR
+            }
             SectionKind::Text => macho::S_ATTR_SOME_INSTRUCTIONS | macho::S_ATTR_PURE_INSTRUCTIONS,
             SectionKind::ZeroFilled => macho::S_ZEROFILL,
-            SectionKind::CStrings => macho::S_CSTRING_LITERALS,
+            SectionKind::StringTable => macho::S_CSTRING_LITERALS,
             SectionKind::LumeMetadata => macho::S_ATTR_NO_DEAD_STRIP,
             SectionKind::LumeAliases => macho::S_LITERAL_POINTERS,
+            SectionKind::Elf(_) => unreachable!(),
         };
 
         writer.write_u32(flags)?;

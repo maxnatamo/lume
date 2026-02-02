@@ -106,7 +106,7 @@ fn main() {
     };
 
     if args.print_search_paths {
-        let search_paths = linker::library::search_paths(&config).unwrap_or_default();
+        let search_paths = linker::search_paths(&config).unwrap_or_default();
         for path in search_paths {
             println!("{}", path.display());
         }

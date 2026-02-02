@@ -7,9 +7,6 @@ use regex::Regex;
 
 use crate::*;
 
-/// Default entry point symbol name.
-pub const DEFAULT_ENTRY: &str = "_main";
-
 pub(crate) trait SizedEntry: Hash + Debug + Clone + PartialEq + Eq {
     /// Gets the physical size of the entry within the file.
     fn physical_size(entry: &Self, ctx: &Context<Self>) -> u64;
@@ -358,13 +355,13 @@ impl NameMatcher {
 #[derive(Debug, Clone)]
 pub(crate) struct Boundary {
     /// Name of the boundary symbol.
-    pub symbol_name: String,
+    pub symbol_name: Interned<String>,
 
     /// Name of the section in which the symbol is placed.
-    pub placed_in: Option<String>,
+    pub placed_in: Option<Interned<String>>,
 
     /// Name of the section which the boundary symbol references.
-    pub bound_section: Option<String>,
+    pub bound_section: Option<Interned<String>>,
 
     /// Where the boundary symbol should point to within the section.
     pub placement: BoundaryPlacement,
@@ -373,7 +370,7 @@ pub(crate) struct Boundary {
 impl Boundary {
     pub fn new<N: Into<String>>(name: N) -> Self {
         Self {
-            symbol_name: name.into(),
+            symbol_name: name.into().intern(),
             bound_section: None,
             placed_in: None,
             placement: BoundaryPlacement::Start,
@@ -382,14 +379,14 @@ impl Boundary {
 
     /// Bind the boundary symbol to point to the start of the given section.
     pub fn bound_to_start_of<S: Into<String>>(mut self, section_name: S) -> Self {
-        self.bound_section = Some(section_name.into());
+        self.bound_section = Some(section_name.into().intern());
         self.placement = BoundaryPlacement::Start;
         self
     }
 
     /// Bind the boundary symbol to point to the end of the given section.
     pub fn bound_to_end_of<S: Into<String>>(mut self, section_name: S) -> Self {
-        self.bound_section = Some(section_name.into());
+        self.bound_section = Some(section_name.into().intern());
         self.placement = BoundaryPlacement::End;
         self
     }
@@ -409,7 +406,7 @@ impl Boundary {
     /// - the placement section defines which section the symbol itself should
     ///   be placed in.
     pub fn placed_in<S: Into<String>>(mut self, section_name: S) -> Self {
-        self.placed_in = Some(section_name.into());
+        self.placed_in = Some(section_name.into().intern());
         self
     }
 }

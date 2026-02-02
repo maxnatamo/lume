@@ -35,7 +35,7 @@ pub enum ObjectFormat {
 }
 
 /// Unique identifier for an input file.
-#[derive(derive_more::Display, Debug, Hash, Clone, Copy, PartialEq, Eq)]
+#[derive(derive_more::Display, Default, Debug, Hash, Clone, Copy, PartialEq, Eq)]
 #[display("file-{_0}")]
 pub struct InputFileId(pub usize);
 
@@ -242,6 +242,9 @@ where
 
         match obj_section.flags() {
             object::SectionFlags::Elf { sh_flags } => {
+                // ELF sections are readable by default
+                section_flags |= SectionFlags::Readable;
+
                 if sh_flags & u64::from(object::elf::SHF_ALLOC) != 0 {
                     section_flags |= SectionFlags::Allocate;
                 }
@@ -419,7 +422,11 @@ fn section_kind_from(section: &object::Section) -> SectionKind {
     match section.kind() {
         object::SectionKind::Text => SectionKind::Text,
         object::SectionKind::Data => SectionKind::Data,
-        object::SectionKind::ReadOnlyString => SectionKind::CStrings,
+        object::SectionKind::ReadOnlyString => SectionKind::StringTable,
+        object::SectionKind::UninitializedData => SectionKind::UninitializedData,
+        object::SectionKind::ReadOnlyData => SectionKind::ReadOnlyData,
+        object::SectionKind::Elf(ty) => SectionKind::Elf(ty),
+        object::SectionKind::Metadata if section_name == ".strtab" => SectionKind::Elf(object::elf::SHT_STRTAB),
         _ => SectionKind::Unknown,
     }
 }
