@@ -140,7 +140,7 @@ where
 /// it concatinates multiple object files onto the list, if an input file
 /// contains multiple object files.
 #[allow(unused_mut, reason = "only used on macOS")]
-pub fn parse_inputs<'input, I>(input_files: I, arch: Architecture) -> Result<ParsedInputs>
+pub fn parse_inputs<'input, I>(input_files: I, arch: Arch) -> Result<ParsedInputs>
 where
     I: Iterator<Item = &'input InputFile>,
 {
@@ -370,15 +370,8 @@ where
             .collect::<Vec<_>>();
     }
 
-    let format = match object.format() {
-        object::BinaryFormat::Elf => ObjectFormat::Elf,
-        object::BinaryFormat::MachO => ObjectFormat::MachO,
-        format => panic!("Unsupported binary format: {format:?}"),
-    };
-
     Ok(ObjectFile {
         id: object_id,
-        format,
         sections,
         symbols,
         archive_entry: None,
@@ -432,7 +425,7 @@ fn section_kind_from(section: &object::Section) -> SectionKind {
 }
 
 #[cfg(target_os = "macos")]
-fn read_framework_symbols(lib_path: &Path, arch: Architecture) -> Result<IndexMap<LibraryId, FrameworkLibrary>> {
+fn read_framework_symbols(lib_path: &Path, arch: Arch) -> Result<IndexMap<LibraryId, FrameworkLibrary>> {
     #[derive(Default, Clone, Debug, serde::Deserialize, PartialEq)]
     #[serde(default)]
     struct Document {

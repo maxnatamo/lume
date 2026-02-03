@@ -1,16 +1,5 @@
 use lume_errors::Result;
 
-use crate::{Context, Linker, ObjectFormat, macho};
-
-pub(crate) fn write_to<W: Writer>(writer: &mut W, linker: &mut Linker) -> Result<()> {
-    let ctx = Context::new(linker);
-
-    match ctx.target.format {
-        ObjectFormat::MachO => macho::write(ctx, writer),
-        ObjectFormat::Elf => unimplemented!(),
-    }
-}
-
 /// Trait for writing data to a buffer (which may be a memory block, file
 /// descriptor or otherwise).
 pub(crate) trait Writer {

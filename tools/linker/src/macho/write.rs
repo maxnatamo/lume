@@ -11,7 +11,7 @@ use crate::{align_to, page_align};
 pub(crate) fn emit_to<W: Writer>(writer: &mut W, mut layout: Layout<'_>) -> Result<()> {
     layout.virtual_places = layout_virtual_places(&layout, |entry| match &entry {
         Entry::PageZero => {
-            if layout.target().is_64bit() {
+            if layout.target().arch.is_64bit() {
                 super::PAGE_ZERO_SIZE_64
             } else {
                 super::PAGE_ZERO_SIZE_32
@@ -112,7 +112,7 @@ fn write_file_header<W: Writer>(layout: &Layout<'_>, writer: &mut W) -> Result<(
     let flags = macho::MH_DYLDLINK | macho::MH_PIE | macho::MH_NOUNDEFS;
     writer.write_u32(flags)?;
 
-    if layout.target().is_64bit() {
+    if layout.target().arch.is_64bit() {
         writer.write_u32(0)?; // reserved (64-bit only)
     }
 

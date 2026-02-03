@@ -1,7 +1,7 @@
 use indexmap::IndexSet;
 
 use crate::macho::*;
-use crate::{Context, Target, page_align};
+use crate::{Arch, Context, TargetTriple, page_align};
 
 pub struct Layout<'db> {
     pub(crate) ctx: Context<'db, Entry>,
@@ -34,13 +34,13 @@ impl<'db> Layout<'db> {
     }
 
     #[inline]
-    pub fn target(&self) -> Target {
+    pub fn target(&self) -> TargetTriple {
         self.ctx.target
     }
 
     #[inline]
     pub fn magic_number(&self) -> u32 {
-        if self.target().is_64bit() {
+        if self.target().arch.is_64bit() {
             macho::MH_MAGIC_64
         } else {
             macho::MH_MAGIC
@@ -49,15 +49,15 @@ impl<'db> Layout<'db> {
 
     #[inline]
     pub fn cpu_type(&self) -> u32 {
-        let cpu_type = if self.target().is_arm() {
+        let cpu_type = if self.target().arch.is_arm() {
             macho::CPU_TYPE_ARM
-        } else if self.target().is_x86() {
+        } else if self.target().arch.is_x86() {
             macho::CPU_TYPE_X86
         } else {
             macho::CPU_TYPE_ANY
         };
 
-        if self.target().is_64bit() {
+        if self.target().arch.is_64bit() {
             cpu_type | macho::CPU_ARCH_ABI64
         } else {
             cpu_type | macho::CPU_ARCH_ABI64_32
@@ -67,8 +67,8 @@ impl<'db> Layout<'db> {
     #[inline]
     pub fn cpu_subtype(&self) -> u32 {
         match self.target().arch {
-            Architecture::Arm | Architecture::Arm64 => macho::CPU_SUBTYPE_ARM_ALL,
-            Architecture::X86 | Architecture::X86_64 => macho::CPU_SUBTYPE_X86_ALL,
+            Arch::Arm | Arch::Arm64 => macho::CPU_SUBTYPE_ARM_ALL,
+            Arch::X86 | Arch::X86_64 => macho::CPU_SUBTYPE_X86_ALL,
         }
     }
 

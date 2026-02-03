@@ -1,4 +1,5 @@
 mod layout;
+pub(crate) mod merge;
 mod reloc;
 mod write;
 
@@ -146,27 +147,27 @@ impl SizedEntry for Entry {
     fn physical_size(entry: &Self, ctx: &Context<'_, Self>) -> u64 {
         match entry {
             Entry::FileHeader => {
-                if ctx.target.is_64bit() {
+                if ctx.target.arch.is_64bit() {
                     size_of::<macho::MachHeader64<NE>>() as u64
                 } else {
                     size_of::<macho::MachHeader32<NE>>() as u64
                 }
             }
             Entry::PageZero | Entry::LinkEdit => {
-                if ctx.target.is_64bit() {
+                if ctx.target.arch.is_64bit() {
                     size_of::<macho::SegmentCommand64<NE>>() as u64
                 } else {
                     size_of::<macho::SegmentCommand32<NE>>() as u64
                 }
             }
             Entry::SegmentHeader(segment_content) => {
-                let segment_size = if ctx.target.is_64bit() {
+                let segment_size = if ctx.target.arch.is_64bit() {
                     size_of::<macho::SegmentCommand64<NE>>() as u64
                 } else {
                     size_of::<macho::SegmentCommand32<NE>>() as u64
                 };
 
-                let section_size = if ctx.target.is_64bit() {
+                let section_size = if ctx.target.arch.is_64bit() {
                     size_of::<macho::Section64<NE>>() as u64
                 } else {
                     size_of::<macho::Section32<NE>>() as u64
@@ -368,7 +369,7 @@ where
 fn define_symbols(ctx: &Context<'_, Entry>) -> SymbolTable {
     let sorted_symbols = sort_symbols(ctx, ctx.symbols.iter_ids());
 
-    let nlist_size = if ctx.target.is_64bit() {
+    let nlist_size = if ctx.target.arch.is_64bit() {
         size_of::<macho::Nlist64<NE>>() as u64
     } else {
         size_of::<macho::Nlist32<NE>>() as u64

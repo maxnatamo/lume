@@ -7,72 +7,6 @@ use lume_span::{Internable, Interned};
 
 use crate::*;
 
-/// Representation of a target which is expected to run the linked executables.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Target {
-    pub arch: Architecture,
-    pub format: ObjectFormat,
-    pub endian: Endianess,
-}
-
-impl Target {
-    pub fn is_64bit(self) -> bool {
-        self.arch.is_64bit()
-    }
-
-    pub fn is_x86(self) -> bool {
-        self.arch.is_x86()
-    }
-
-    pub fn is_arm(self) -> bool {
-        self.arch.is_arm()
-    }
-
-    pub fn is_little_endian(self) -> bool {
-        self.endian == Endianess::Little
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "constructed per host arch")]
-pub enum Architecture {
-    #[cfg_attr(target_arch = "x86", default)]
-    X86,
-
-    #[cfg_attr(target_arch = "x86_64", default)]
-    X86_64,
-
-    #[cfg_attr(target_arch = "arm", default)]
-    Arm,
-
-    #[cfg_attr(target_arch = "aarch64", default)]
-    Arm64,
-}
-
-impl Architecture {
-    pub fn is_64bit(self) -> bool {
-        matches!(self, Architecture::X86_64 | Architecture::Arm64)
-    }
-
-    pub fn is_x86(self) -> bool {
-        matches!(self, Architecture::X86 | Architecture::X86_64)
-    }
-
-    pub fn is_arm(self) -> bool {
-        matches!(self, Architecture::Arm | Architecture::Arm64)
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "constructed per host arch")]
-pub enum Endianess {
-    #[cfg_attr(target_endian = "big", default)]
-    Big,
-
-    #[cfg_attr(target_endian = "little", default)]
-    Little,
-}
-
 /// Unique identifier for an object file.
 #[derive(derive_more::Display, Default, Debug, Hash, Clone, Copy, PartialEq, Eq)]
 #[display("obj-{}-{id}", file.0)]
@@ -91,9 +25,6 @@ pub struct ObjectId {
 pub struct ObjectFile {
     /// Unique identifier for the object file.
     pub id: ObjectId,
-
-    /// Defines the format of the object file.
-    pub format: ObjectFormat,
 
     /// Name of the archive entry, if the file is part of an archive.
     pub archive_entry: Option<String>,
@@ -139,7 +70,9 @@ pub struct FrameworkLibrary {
 
 #[derive(Hash, Clone, PartialEq, Eq)]
 pub struct SectionName {
+    /// Name of the segment containing this section (only used in Mach-O).
     pub segment: Option<Interned<String>>,
+
     pub section: Interned<String>,
 }
 
@@ -162,7 +95,7 @@ impl Display for SectionName {
     }
 }
 
-#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Hash, Clone, Copy, PartialEq, Eq)]
 pub struct InputSectionId {
     pub object: ObjectId,
     pub id: usize,
@@ -177,7 +110,7 @@ impl InputSectionId {
     }
 }
 
-#[derive(derive_more::Debug, Clone)]
+#[derive(derive_more::Debug, Default, Clone)]
 pub struct InputSection {
     pub id: InputSectionId,
 
@@ -333,7 +266,6 @@ pub struct OutputSection {
     pub size: u64,
     pub alignment: usize,
     pub kind: SectionKind,
-
     pub flags: SectionFlags,
 
     /// Defines the IDs of the sections which have been merged into this
@@ -354,9 +286,10 @@ pub struct Placement {
     pub size: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionKind {
     /// Unknown section.
+    #[default]
     Unknown,
 
     /// Executable code section.
@@ -388,7 +321,7 @@ pub enum SectionKind {
 }
 
 bitflags::bitflags! {
-    #[derive(Hash, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Hash, Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     pub struct SectionFlags: u32 {
         const None = 0;
 
@@ -403,6 +336,12 @@ bitflags::bitflags! {
 
         /// Section occupies memory during execution.
         const Allocate = 1 << 4;
+
+        /// Section data can be merged.
+        const Merge = 1 << 5;
+
+        /// Section is thread-local storage.
+        const TLS = 1 << 6;
     }
 }
 
@@ -412,6 +351,8 @@ impl Display for SectionFlags {
         write!(f, "{}", if self.contains(Self::Writable) { "W" } else { " " })?;
         write!(f, "{}", if self.contains(Self::Executable) { "X" } else { " " })?;
         write!(f, "{}", if self.contains(Self::Allocate) { "A" } else { " " })?;
+        write!(f, "{}", if self.contains(Self::Merge) { "M" } else { " " })?;
+        write!(f, "{}", if self.contains(Self::TLS) { "T" } else { " " })?;
 
         Ok(())
     }

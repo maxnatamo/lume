@@ -77,19 +77,6 @@ pub(crate) fn index_symbols(db: &Database, dcx: &DiagCtxHandle) -> Result<Symbol
         }
     }
 
-    // Ensure that all global symbols are resolved as well, since they are not
-    // guaranteed to be referenced (such as entrypoint symbols).
-    if let Some(global_bucket) = builder.bucket(BucketKey::StrongGlobal) {
-        for symbol_name in global_bucket.names() {
-            let symbol_id = builder
-                .find_global(symbol_name)
-                .expect("globals entry must have non-empty entry");
-
-            // TODO: should this be overwritten or kept the same?
-            resolved_globals.insert(symbol_name, symbol_id);
-        }
-    }
-
     if !errors.is_empty() {
         dcx.emit_and_push(diagnostic!("failed to resolve symbols").add_causes(errors).into());
         dcx.ensure_untainted()?;

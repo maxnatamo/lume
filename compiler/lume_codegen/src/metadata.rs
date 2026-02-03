@@ -166,29 +166,29 @@ impl CraneliftBackend {
     fn declare_tables(&self) -> TableDefinitions {
         let types = self
             .module_mut()
-            .declare_data(TYPE_TABLE_NAME, cranelift_module::Linkage::Export, false, false)
+            .declare_data(TYPE_TABLE_NAME, cranelift_module::Linkage::Local, false, false)
             .unwrap();
 
         let fields = self
             .module_mut()
-            .declare_data(FIELD_TABLE_NAME, cranelift_module::Linkage::Export, false, false)
+            .declare_data(FIELD_TABLE_NAME, cranelift_module::Linkage::Local, false, false)
             .unwrap();
 
         let methods = self
             .module_mut()
-            .declare_data(METHOD_TABLE_NAME, cranelift_module::Linkage::Export, false, false)
+            .declare_data(METHOD_TABLE_NAME, cranelift_module::Linkage::Local, false, false)
             .unwrap();
 
         let parameters = self
             .module_mut()
-            .declare_data(PARAMETER_TABLE_NAME, cranelift_module::Linkage::Export, false, false)
+            .declare_data(PARAMETER_TABLE_NAME, cranelift_module::Linkage::Local, false, false)
             .unwrap();
 
         let type_parameters = self
             .module_mut()
             .declare_data(
                 TYPE_PARAMETER_TABLE_NAME,
-                cranelift_module::Linkage::Export,
+                cranelift_module::Linkage::Local,
                 false,
                 false,
             )

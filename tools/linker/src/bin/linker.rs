@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use clap::error::ContextValue;
+use linker::{Endianess, TargetTriple, parse_target_triple};
 use lume_errors::{DiagCtx, MapDiagnostic};
 
 #[derive(Clone)]
@@ -51,6 +52,43 @@ impl clap::builder::TypedValueParser for HexParser {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct TargetTripleParser;
+
+impl clap::builder::TypedValueParser for TargetTripleParser {
+    type Value = TargetTriple;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &OsStr,
+    ) -> std::result::Result<Self::Value, clap::Error> {
+        let value = value.to_str().expect("invalid unicode");
+
+        match parse_target_triple(value) {
+            Ok(triple) => Ok(triple),
+            Err(diagnostic) => {
+                let mut err = clap::Error::new(clap::error::ErrorKind::InvalidValue).with_cmd(cmd);
+
+                if let Some(arg) = arg {
+                    err.insert(
+                        clap::error::ContextKind::InvalidArg,
+                        ContextValue::String(arg.to_string()),
+                    );
+                }
+
+                err.insert(
+                    clap::error::ContextKind::Custom,
+                    ContextValue::String(diagnostic.message()),
+                );
+
+                Err(err)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[clap(
     name = "linker",
@@ -80,6 +118,14 @@ pub(crate) struct Arguments {
     #[arg(long, value_name = "ENTRY")]
     pub entry: Option<String>,
 
+    /// Target triple
+    #[arg(long, value_name = "TRIPLE", value_parser = TargetTripleParser)]
+    pub target: Option<TargetTriple>,
+
+    /// Endianess of the linked file
+    #[arg(long, value_name = "ENDIAN", value_parser = ["little", "big"])]
+    pub endian: Option<String>,
+
     /// Initial stack memory size
     #[arg(long, value_name = "SIZE", value_parser = HexParser)]
     pub stack_size: Option<u64>,
@@ -103,6 +149,13 @@ fn main() {
         libraries: args.libraries,
         stack_size: args.stack_size,
         print_entries: args.print_entries,
+        target_triple: args.target,
+        endianess: match args.endian.map(|e| e.to_ascii_lowercase()).as_deref() {
+            Some("little") => Some(Endianess::Little),
+            Some("big") => Some(Endianess::Big),
+            Some(_) => unreachable!(),
+            _ => None,
+        },
     };
 
     if args.print_search_paths {

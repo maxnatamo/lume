@@ -529,7 +529,7 @@ impl CraneliftBackend {
             size: symbol_size as u64,
             kind: object::write::SymbolKind::Data,
             scope: object::write::SymbolScope::Linkage,
-            weak: false,
+            weak: true,
             section: object::write::SymbolSection::Section(section_id),
             flags: object::SymbolFlags::None,
         });

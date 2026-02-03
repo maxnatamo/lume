@@ -40,6 +40,10 @@ pub fn merge_sections(db: &mut Database, layout: Layout) {
     db.output_segments = segments;
     db.output_sections = sections;
 
+    if layout.target.object_format() == ObjectFormat::Elf {
+        crate::elf::apply_rules(db);
+    }
+
     reorder_sections(db, &layout);
     add_reserved_symbols(db, &layout);
     add_boundary_symbols(db, &layout);
@@ -90,7 +94,7 @@ impl Default for RequiredSection {
 /// For example, `libc.a` on Linux requires `.preinit_array` which is only
 /// declared for some C/C++ object files.
 fn add_reserved_symbols(db: &mut Database, layout: &Layout) {
-    let required_sections = match layout.target.format {
+    let required_sections = match layout.target.object_format() {
         ObjectFormat::Elf => vec![
             RequiredSection {
                 name: String::from(".init"),

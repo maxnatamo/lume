@@ -4,25 +4,25 @@ use indexmap::{IndexMap, IndexSet};
 use lume_errors::{DiagCtxHandle, Result};
 
 pub(crate) mod common;
-pub(crate) use common::*;
-
 pub(crate) mod input;
-pub(crate) use input::*;
-
 pub(crate) mod layout;
+
+pub(crate) use common::*;
+pub(crate) use input::*;
 pub(crate) use layout::*;
 
 pub mod library;
 pub use library::search_paths;
 
+pub mod triple;
+pub use triple::*;
+
 pub(crate) mod elf;
 pub(crate) mod macho;
-pub(crate) mod merge;
 pub(crate) mod native;
 pub(crate) mod symbol_db;
 pub(crate) mod write;
 
-use crate::merge::merge_sections;
 pub(crate) use crate::symbol_db::{SymbolDb, index_symbols};
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -39,27 +39,37 @@ pub struct Config {
     /// Initial stack memory size
     pub stack_size: Option<u64>,
 
+    /// Target triple of the linked file
+    pub target_triple: Option<TargetTriple>,
+
+    /// Endianess of the linked file
+    pub endianess: Option<Endianess>,
+
     /// Print the output entries before writing the output file
     pub print_entries: bool,
+}
+
+struct Linker {
+    config: Config,
+    target: TargetTriple,
+    endian: Endianess,
+
+    symbols: SymbolDb,
+    db: Database,
 }
 
 pub fn link<I>(config: Config, input_files: I, dcx: &DiagCtxHandle) -> Result<Box<[u8]>>
 where
     I: IntoIterator<Item = PathBuf>,
 {
-    let arch = Architecture::default();
-
     let mut inputs = input_files.into_iter().collect::<Vec<_>>();
     inputs.extend(library::search_libraries(&config)?);
 
-    let read_inputs = input::read_inputs(inputs)?;
-    let parsed_inputs = input::parse_inputs(read_inputs.values(), arch)?;
+    let target = config.target_triple.unwrap_or_else(current_target_triple);
+    let endian = config.endianess.unwrap_or_default();
 
-    let target = Target {
-        arch,
-        format: parsed_inputs.objects.values().next().unwrap().format,
-        endian: Endianess::default(),
-    };
+    let read_inputs = input::read_inputs(inputs)?;
+    let parsed_inputs = input::parse_inputs(read_inputs.values(), target.arch)?;
 
     let mut db = Database {
         files: read_inputs,
@@ -68,29 +78,27 @@ where
         ..Database::default()
     };
 
-    db.add_dummy_object();
-
-    let layout = Layout::default_layout(target);
-    merge_sections(&mut db, layout);
+    match target.object_format() {
+        ObjectFormat::Elf => elf::merge::merge_sections(&mut db),
+        ObjectFormat::MachO => macho::merge::merge_sections(&mut db),
+    }
 
     let mut linker = Linker {
         config,
         target,
+        endian,
         symbols: index_symbols(&db, dcx)?,
         db,
     };
 
     let mut writer = write::MemoryWriter::new();
-    write::write_to(&mut writer, &mut linker)?;
+
+    match linker.target.object_format() {
+        ObjectFormat::MachO => macho::write(Context::new(&mut linker), &mut writer)?,
+        ObjectFormat::Elf => elf::write(Context::new(&mut linker), &mut writer)?,
+    }
 
     Ok(writer.into_inner())
-}
-
-struct Linker {
-    config: Config,
-    target: Target,
-    symbols: SymbolDb,
-    db: Database,
 }
 
 struct Database {
@@ -115,7 +123,6 @@ impl Database {
 
         self.objects.insert(self.dummy_object, ObjectFile {
             id: self.dummy_object,
-            format: ObjectFormat::Elf,
             archive_entry: None,
             sections: IndexMap::new(),
             symbols: IndexMap::new(),
