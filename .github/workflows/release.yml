@@ -39,7 +39,7 @@ jobs:
 
       - name: Create release artifacts
         run: |
-          tar --create --file=$ARCHIVE_FILE ./std/ ./LICENSE
+          tar --create --file=$ARCHIVE_FILE ./std/ ./LICENSE.md
           tar --append --file=$ARCHIVE_FILE --directory=./target/release/ ./liblume_runtime.a ./lume
           cp --dereference --verbose ./target/release/lume-bootstrap $BOOTSTRAP_BIN
 
