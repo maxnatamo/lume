@@ -39,12 +39,12 @@ jobs:
 
       - name: Create release artifacts
         run: |
-          tar --create --file=$ARCHIVE_FILE ./std/ ./LICENSE.md
-          tar --append --file=$ARCHIVE_FILE --directory=./target/release/ ./liblume_runtime.a ./lume
-          cp --dereference --verbose ./target/release/lume-bootstrap $BOOTSTRAP_BIN
+          tar --create --file=${{ env.ARCHIVE_FILE }} ./std/ ./LICENSE.md
+          tar --append --file=${{ env.ARCHIVE_FILE }} --directory=./target/release/ ./liblume_runtime.a ./lume
+          cp -v ./target/release/lume-bootstrap ${{ env.BOOTSTRAP_BIN }}
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            $ARCHIVE_FILE
-            $BOOTSTRAP_BIN
+            ${{ env.ARCHIVE_FILE }}
+            ${{ env.BOOTSTRAP_BIN }}
