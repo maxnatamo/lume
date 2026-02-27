@@ -43,7 +43,7 @@ jobs:
           tar --append --file=${{ env.ARCHIVE_FILE }} --directory=./target/release/ ./liblume_runtime.a ./lume
           cp -v ./target/release/lume-bootstrap ${{ env.BOOTSTRAP_BIN }}
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2.4.2
         with:
           files: |
             ${{ env.ARCHIVE_FILE }}
