@@ -1,13 +1,14 @@
 use indexmap::{IndexMap, IndexSet};
 use lume_mir::{Generics, Instance};
+use lume_mir_queries::MirQueryCtx;
 use lume_span::NodeId;
-
-pub(crate) mod collector;
-pub use collector::collect;
+use lume_types::TypeRef;
 
 pub(crate) mod canonicalize;
-pub use canonicalize::canonicalize;
-use lume_types::TypeRef;
+pub(crate) mod collector;
+
+pub mod metadata;
+pub use metadata::collect_metadata_into;
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct MonoItems {
@@ -53,4 +54,26 @@ impl Extend<Instance> for MonoItems {
             self.push_instance(item);
         }
     }
+}
+
+pub(crate) struct MirMonoCtx<'mir, 'tcx> {
+    mcx: &'mir mut MirQueryCtx<'tcx>,
+}
+
+impl lume_architect::DatabaseContext for MirMonoCtx<'_, '_> {
+    fn db(&self) -> &lume_architect::Database {
+        lume_architect::DatabaseContext::db(self.mcx.tcx())
+    }
+}
+
+/// Monomorphizes the MIR for the given context, returning the canonicalized
+/// mono items. The returned structure contains the mapping of monomorphized
+/// functions, as well as all collected monotypes.
+///
+/// The canonicalized functions are directly inserted into the given MIR.
+pub fn monomorphize(mcx: &mut MirQueryCtx<'_>) -> MonoItems {
+    let mut ctx = MirMonoCtx { mcx };
+    let mono_items = ctx.collect().expect("failed to collect mono items");
+
+    ctx.canonicalize(mono_items)
 }

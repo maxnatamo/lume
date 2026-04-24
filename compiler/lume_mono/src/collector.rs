@@ -6,16 +6,18 @@ use lume_span::NodeId;
 use lume_typech::TyCheckCtx;
 use lume_types::TypeRef;
 
-use crate::{Generics, Instance, MonoItems};
+use crate::*;
 
-#[tracing::instrument(level = "INFO", skip_all, fields(package = mcx.tcx().current_package().name), err)]
-pub fn collect(mcx: &MirQueryCtx<'_>) -> Result<MonoItems> {
-    let mut items = MonoItems::default();
-    items.extend(collect_roots(mcx)?);
+impl MirMonoCtx<'_, '_> {
+    #[tracing::instrument(level = "INFO", skip_all, fields(package = self.mcx.tcx().current_package().name), err)]
+    pub fn collect(&self) -> Result<MonoItems> {
+        let mut items = MonoItems::default();
+        items.extend(collect_roots(self.mcx)?);
 
-    collect_monotypes(mcx, &mut items)?;
+        collect_monotypes(self.mcx, &mut items)?;
 
-    Ok(items)
+        Ok(items)
+    }
 }
 
 #[tracing::instrument(level = "DEBUG", skip_all, fields(package = mcx.tcx().current_package().name), err)]

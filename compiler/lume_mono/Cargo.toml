@@ -19,6 +19,7 @@ lume_span = { path = "../../crates/lume_span" }
 lume_typech = { path = "../lume_typech" }
 lume_types = { path = "../lume_types" }
 
+lume_architect = { workspace = true }
 indexmap = { workspace = true }
 tracing = { workspace = true }
 
