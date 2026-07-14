@@ -9,3 +9,17 @@ test-manifold = "run --package manifold --"
 # default, but I am not taking any chances.
 [build]
 rustflags = ["-Cforce-frame-pointers"]
+
+# Limit debug information for workspace members to what
+# is needed for useful panic backtraces
+[profile.dev]
+debug = "line-tables-only"
+
+# Avoid generating any debug information for dependencies
+[profile.dev.package."*"]
+debug = false
+
+# To use the opt-in debugging profile, run with `--profile debug`
+[profile.debug]
+inherits = "dev"
+debug = true
