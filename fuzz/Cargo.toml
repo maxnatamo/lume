@@ -18,29 +18,32 @@ lume_lexer = { path = "../compiler/lume_lexer" }
 lume_parser = { path = "../compiler/lume_parser" }
 lume_span = { path = "../crates/lume_span" }
 
+[lints]
+workspace = true
+
 [[bin]]
-name = "fuzz_lexer"
+name = "fuzz-lexer"
 path = "fuzz_targets/lume_lexer.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_parser"
+name = "fuzz-parser"
 path = "fuzz_targets/lume_parser.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_parser_expr"
+name = "fuzz-parser-expr"
 path = "fuzz_targets/lume_parser_expr.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_compiler"
+name = "fuzz-compiler"
 path = "fuzz_targets/lume_mutation.rs"
 test = false
 doc = false

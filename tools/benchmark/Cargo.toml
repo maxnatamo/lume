@@ -14,7 +14,6 @@ divan = { version = "0.1.21" }
 proc-macro2 = {version = "1" }
 quote = { version = "1.0.44" }
 
-build_stage = { path = "../build_stage" }
 lume_benchmark_macros = { path = "../benchmark_macros" }
 lume_driver = { path = "../../compiler/lume_driver", features = ["test-support"] }
 lume_errors = { path = "../../crates/lume_errors" }

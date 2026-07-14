@@ -11,8 +11,6 @@ doctest = false
 proc-macro = true
 
 [dependencies]
-manifold = { path = "../manifold" }
-
 darling = { version = "0.21.3" }
 proc-macro2 = "1"
 quote = "1"

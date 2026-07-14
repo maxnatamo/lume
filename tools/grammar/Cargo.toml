@@ -14,8 +14,6 @@ name = "grammar-codegen"
 test = false
 
 [dependencies]
-lume_span = { path = "../../crates/lume_span" }
-
 prettyplease = { version = "0.2" }
 proc-macro2 = { version = "1.0" }
 quote = { version = "1.0.45" }

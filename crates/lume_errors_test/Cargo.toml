@@ -9,8 +9,6 @@ test = false
 doctest = false
 
 [dependencies]
-lume_errors = { path = "../lume_errors" }
-
 error_snippet = { workspace = true }
 insta = { version = "=1.43.1", features = ["yaml", "filters"] }
 owo-colors = { workspace = true }
