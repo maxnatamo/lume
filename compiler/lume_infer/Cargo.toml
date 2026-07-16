@@ -8,11 +8,11 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-lume_errors = { path = "../../crates/lume_errors" }
-lume_hir = { path = "../lume_hir" }
-lume_session = { path = "../lume_session" }
-lume_span = { path = "../../crates/lume_span" }
-lume_types = { path = "../lume_types" }
+lume_errors = { workspace = true }
+lume_hir = { workspace = true }
+lume_session = { workspace = true }
+lume_span = { workspace = true }
+lume_types = { workspace = true }
 
 lume_architect = { workspace = true }
 error_snippet = { workspace = true }
@@ -22,9 +22,9 @@ indexmap = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-arc = { path = "../arc" }
-lume_errors_test = { path = "../../crates/lume_errors_test" }
-lume_hir_lower = { path = "../lume_hir_lower" }
+arc = { workspace = true }
+lume_errors_test = { workspace = true }
+lume_hir_lower = { workspace = true }
 
 insta = { version = "1.42.2", features = ["yaml"] }
 

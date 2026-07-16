@@ -8,11 +8,11 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-build_stage = { path = "../build_stage" }
-lume_driver = { path = "../../compiler/lume_driver", features = ["test-support"] }
-lume_errors = { path = "../../crates/lume_errors" }
-lume_gc = { path = "../../rt/lume_gc", features = ["paranoid"] }
-lume_span = { path = "../../crates/lume_span" }
+build_stage = { workspace = true }
+lume_driver = { workspace = true, features = ["test-support"] }
+lume_errors = { workspace = true }
+lume_gc = { workspace = true, features = ["paranoid"] }
+lume_span = { workspace = true }
 
 clap = { workspace = true }
 error_snippet = { workspace = true }

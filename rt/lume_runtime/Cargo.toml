@@ -10,11 +10,11 @@ crate-type = ["lib", "staticlib"]
 
 [dependencies]
 backtrace = { version = "=0.3.76" }
-lume_gc = { path = "../lume_gc" }
-lume_options = { path = "../lume_options" }
-lume_rt_metadata = { path = "../lume_rt_metadata" }
-lume_signals = { path = "../../crates/lume_signals" }
-lume_tagged = { path = "../lume_tagged" }
+lume_gc = { workspace = true }
+lume_options = { workspace = true }
+lume_rt_metadata = { workspace = true }
+lume_signals = { workspace = true }
+lume_tagged = { workspace = true }
 
 owo-colors = { version = "4.2", optional = true, features = ["supports-colors"] }
 

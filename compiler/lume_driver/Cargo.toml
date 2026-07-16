@@ -5,37 +5,37 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-arc = { path = "../arc" }
-lume_errors = { path = "../../crates/lume_errors" }
-lume_hir = { path = "../lume_hir" }
-lume_hir_lower = { path = "../lume_hir_lower" }
-lume_infer = { path = "../lume_infer" }
-lume_linker = { path = "../lume_linker" }
-lume_metadata = { path = "../../crates/lume_metadata" }
-lume_mir = { path = "../lume_mir" }
-lume_mir_lower = { path = "../lume_mir_lower" }
-lume_mir_opt = { path = "../lume_mir_opt" }
-lume_session = { path = "../lume_session" }
-lume_span = { path = "../../crates/lume_span" }
-lume_tir = { path = "../lume_tir" }
-lume_tir_lower = { path = "../lume_tir_lower" }
-lume_typech = { path = "../lume_typech" }
-lume_types = { path = "../lume_types" }
-lume_unification = { path = "../lume_unification" }
+arc = { workspace = true }
+lume_errors = { workspace = true }
+lume_hir = { workspace = true }
+lume_hir_lower = { workspace = true }
+lume_infer = { workspace = true }
+lume_linker = { workspace = true }
+lume_metadata = { workspace = true }
+lume_mir = { workspace = true }
+lume_mir_lower = { workspace = true }
+lume_mir_opt = { workspace = true }
+lume_session = { workspace = true }
+lume_span = { workspace = true }
+lume_tir = { workspace = true }
+lume_tir_lower = { workspace = true }
+lume_typech = { workspace = true }
+lume_types = { workspace = true }
+lume_unification = { workspace = true }
 
 ciborium = { version = "=0.2.2" }
 indexmap = { workspace = true }
 tracing = { workspace = true }
 
-lume_codegen = { path = "../lume_codegen", optional = true }
+lume_codegen = { workspace = true, optional = true }
 
 [dev-dependencies]
-lume_errors_test = { path = "../../crates/lume_errors_test" }
+lume_errors_test = { workspace = true }
 
 [features]
 default = ["codegen", "test-support"]
 codegen = ["dep:lume_codegen"]
-test-support = []
+test-support = ["codegen"]
 
 [lints]
 workspace = true

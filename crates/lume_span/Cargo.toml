@@ -8,7 +8,7 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-lume_hash = { path = "../lume_hash" }
+lume_hash = { workspace = true }
 
 error_snippet = { workspace = true }
 error_snippet_derive = { workspace = true }

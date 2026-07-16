@@ -9,22 +9,22 @@ test = false
 doctest = false
 
 [dependencies]
-arc = { path = "../../compiler/arc" }
-lume_codegen = { path = "../../compiler/lume_codegen" }
-lume_errors = { path = "../../crates/lume_errors" }
-lume_hir = { path = "../../compiler/lume_hir" }
-lume_hir_lower = { path = "../../compiler/lume_hir_lower" }
-lume_infer = { path = "../../compiler/lume_infer" }
-lume_linker = { path = "../../compiler/lume_linker" }
-lume_mir = { path = "../../compiler/lume_mir" }
-lume_mir_lower = { path = "../../compiler/lume_mir_lower" }
-lume_session = { path = "../../compiler/lume_session" }
-lume_span = { path = "../../crates/lume_span" }
-lume_tir = { path = "../../compiler/lume_tir" }
-lume_tir_lower = { path = "../../compiler/lume_tir_lower" }
-lume_typech = { path = "../../compiler/lume_typech" }
-lume_types = { path = "../../compiler/lume_types" }
-lume_unification = { path = "../../compiler/lume_unification" }
+arc = { workspace = true }
+lume_codegen = { workspace = true }
+lume_errors = { workspace = true }
+lume_hir = { workspace = true }
+lume_hir_lower = { workspace = true }
+lume_infer = { workspace = true }
+lume_linker = { workspace = true }
+lume_mir = { workspace = true }
+lume_mir_lower = { workspace = true }
+lume_session = { workspace = true }
+lume_span = { workspace = true }
+lume_tir = { workspace = true }
+lume_tir_lower = { workspace = true }
+lume_typech = { workspace = true }
+lume_types = { workspace = true }
+lume_unification = { workspace = true }
 
 [lints]
 workspace = true

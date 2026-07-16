@@ -27,6 +27,63 @@ authors = ["Max T. Kristiansen <me@maxtrier.dk>"]
 license = "MIT"
 
 [workspace.dependencies]
+# Compiler packages
+arc = { path = "compiler/arc" }
+lume_ast = { path = "compiler/lume_ast" }
+lume_assets = { path = "crates/lume_assets" }
+lume_cli = { path = "compiler/lume_cli" }
+lume_cli_tools = { path = "crates/lume_cli_tools" }
+lume_codegen = { path = "compiler/lume_codegen" }
+lume_demangle = { path = "crates/lume_demangle" }
+lume_driver = { path = "compiler/lume_driver", default-features = false }
+lume_errors = { path = "crates/lume_errors" }
+lume_errors_test = { path = "crates/lume_errors_test" }
+lume_hash = { path = "crates/lume_hash" }
+lume_hir = { path = "compiler/lume_hir" }
+lume_hir_lower = { path = "compiler/lume_hir_lower" }
+lume_infer = { path = "compiler/lume_infer" }
+lume_lexer = { path = "compiler/lume_lexer" }
+lume_linker = { path = "compiler/lume_linker" }
+lume_lsp = { path = "compiler/lume_lsp" }
+lume_macros = { path = "crates/lume_macros" }
+lume_mangle = { path = "crates/lume_mangle" }
+lume_metadata = { path = "crates/lume_metadata" }
+lume_mir = { path = "compiler/lume_mir" }
+lume_mir_lower = { path = "compiler/lume_mir_lower" }
+lume_mir_opt = { path = "compiler/lume_mir_opt" }
+lume_mir_queries = { path = "compiler/lume_mir_queries" }
+lume_parser = { path = "compiler/lume_parser" }
+lume_session = { path = "compiler/lume_session" }
+lume_signals = { path = "crates/lume_signals" }
+lume_span = { path = "crates/lume_span" }
+lume_syntax = { path = "crates/lume_syntax" }
+lume_tir = { path = "compiler/lume_tir" }
+lume_tir_lower = { path = "compiler/lume_tir_lower" }
+lume_tracing = { path = "crates/lume_tracing" }
+lume_type_metadata = { path = "compiler/lume_type_metadata" }
+lume_typech = { path = "compiler/lume_typech" }
+lume_types = { path = "compiler/lume_types" }
+lume_unification = { path = "compiler/lume_unification" }
+
+# Compiler tool packages
+bootstrap = { path = "tools/bootstrap" }
+build_stage = { path = "tools/build_stage" }
+lume_benchmark = { path = "tools/benchmark" }
+lume_benchmark_macros = { path = "tools/benchmark_macros" }
+lume_fmt = { path = "tools/fmt" }
+grammar = { path = "tools/grammar" }
+manifold = { path = "tools/manifold" }
+manifold_macros = { path = "tools/manifold_macros" }
+
+# Runtime packages
+lume_gc = { path = "rt/lume_gc" }
+lume_options = { path = "rt/lume_options" }
+lume_rt_macros = { path = "rt/lume_rt_macros" }
+lume_rt_metadata = { path = "rt/lume_rt_metadata" }
+lume_runtime = { path = "rt/lume_runtime" }
+lume_tagged = { path = "rt/lume_tagged" }
+
+# 3rd-party packages
 clap = { version = "=4.5.39", features = ["derive"] }
 error_snippet = { version = "=0.2.0" }
 error_snippet_derive = { version = "=0.1.10" }
@@ -57,13 +114,13 @@ similar-names = "allow"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [dependencies]
-bootstrap = { path = "tools/bootstrap" }
-lume_cli = { path = "compiler/lume_cli" }
-lume_driver = { path = "compiler/lume_driver" }
+bootstrap = { workspace = true }
+lume_cli = { workspace = true }
+lume_driver = { workspace = true }
 
 [dev-dependencies]
-lume_benchmark = { path = "./tools/benchmark" }
-lume_errors = { path = "./crates/lume_errors" }
+lume_benchmark = { workspace = true }
+lume_errors = { workspace = true }
 
 criterion = { version = "0.8.1", features = ["html_reports"] }
 

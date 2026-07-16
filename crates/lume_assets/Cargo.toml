@@ -9,7 +9,7 @@ test = false
 doctest = false
 
 [dependencies]
-lume_errors = { path = "../lume_errors" }
+lume_errors = { workspace = true }
 
 dirs = { version = "=6.0.0" }
 

@@ -8,12 +8,12 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-lume_assets = { path = "../../crates/lume_assets" }
-lume_errors = { path = "../../crates/lume_errors" }
-lume_hash = { path = "../../crates/lume_hash" }
-lume_options = { path = "../../rt/lume_options" }
-lume_session = { path = "../lume_session" }
-lume_span = { path = "../../crates/lume_span" }
+lume_assets = { workspace = true }
+lume_errors = { workspace = true }
+lume_hash = { workspace = true }
+lume_options = { workspace = true }
+lume_session = { workspace = true }
+lume_span = { workspace = true }
 
 error_snippet = { workspace = true }
 error_snippet_derive = { workspace = true }

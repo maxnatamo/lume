@@ -8,9 +8,9 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-lume_assets = { path = "../../crates/lume_assets" }
-lume_cli_tools = { path = "../../crates/lume_cli_tools" }
-lume_errors = { path = "../../crates/lume_errors" }
+lume_assets = { workspace = true }
+lume_cli_tools = { workspace = true }
+lume_errors = { workspace = true }
 
 clap = { workspace = true }
 error_snippet = { workspace = true }

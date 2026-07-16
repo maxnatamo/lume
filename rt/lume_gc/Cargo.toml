@@ -8,10 +8,10 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-lume_options = { path = "../lume_options" }
-lume_rt_macros = { path = "../lume_rt_macros" }
-lume_rt_metadata = { path = "../lume_rt_metadata" }
-lume_tagged = { path = "../lume_tagged" }
+lume_options = { workspace = true }
+lume_rt_macros = { workspace = true }
+lume_rt_metadata = { workspace = true }
+lume_tagged = { workspace = true }
 
 indexmap = { workspace = true }
 mimalloc = { version = "=0.1.48" }
@@ -19,7 +19,7 @@ sysinfo = { version = "=0.37.0" }
 tracing = { workspace = true }
 
 [dev-dependencies]
-lume_benchmark = { path = "../../tools/benchmark" }
+lume_benchmark = { workspace = true }
 
 [features]
 paranoid = []
