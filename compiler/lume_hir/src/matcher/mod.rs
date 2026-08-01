@@ -1,29 +1,34 @@
+pub mod cast;
+pub mod expr;
+pub mod item;
+pub mod pat;
+pub mod stmt;
+pub mod string;
+
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 
+pub use expr::*;
+pub use item::*;
+pub use pat::*;
+pub use stmt::*;
+pub use string::*;
+
 use crate::visitor::traverse_node;
 use crate::*;
-
-pub mod expr;
-pub use expr::*;
-
-pub mod item;
-pub use item::*;
-
-pub mod pat;
-pub use pat::*;
-
-pub mod stmt;
-pub use stmt::*;
-
-pub mod string;
-pub use string::*;
 
 /// Performs a global match against all nodes in the given HIR map.
 ///
 /// Searches the HIR map for nodes which satisfy `matcher` and calls `callback`
 /// for each match. After each match, the return value of `callback` defines
 /// whether the matcher will continue or stop.
+///
+/// # Returns
+///
+/// If a match is found and the callback returns [`ControlFlow::Break`], the
+/// contained value is returned as [`Some`] from this function. If no match is
+/// found or if the callback does not return [`ControlFlow::Break`], returns
+/// [`None`].
 ///
 /// # Examples
 ///
@@ -41,20 +46,20 @@ pub use string::*;
 ///         &mut |result| {
 ///             functions.push(result.bound_node("func").unwrap().id());
 ///
-///             ControlFlow::Continue(())
+///             ControlFlow::<()>::Continue(())
 ///         }
 ///     );
 ///
 ///     functions
 /// }
 /// ```
-pub fn find_matches<'hir>(
+pub fn find_matches<'hir, R>(
     hir: &'hir Map,
     matcher: &dyn Predicate<Subject = Node>,
-    callback: &mut dyn FnMut(&Results<'hir>) -> ControlFlow<()>,
-) {
+    callback: &mut dyn FnMut(&Results<'hir>) -> ControlFlow<R>,
+) -> Option<R> {
     let mut visitor = PredicateVisitor { hir, matcher, callback };
-    let _ = traverse(hir, &mut visitor);
+    traverse(hir, &mut visitor).break_value()
 }
 
 /// Performs a narrowed match against all nodes in the given HIR map, which are
@@ -63,6 +68,13 @@ pub fn find_matches<'hir>(
 /// Searches the HIR map for nodes which satisfy `matcher` and calls `callback`
 /// for each match. After each match, the return value of `callback` defines
 /// whether the matcher will continue or stop.
+///
+/// # Returns
+///
+/// If a match is found and the callback returns [`ControlFlow::Break`], the
+/// contained value is returned as [`Some`] from this function. If no match is
+/// found or if the callback does not return [`ControlFlow::Break`], returns
+/// [`None`].
 ///
 /// # Examples
 ///
@@ -81,7 +93,7 @@ pub fn find_matches<'hir>(
 ///         &mut |result| {
 ///             methods.push(result.bound_node("func").unwrap().id());
 ///
-///             ControlFlow::Continue(())
+///             ControlFlow::<()>::Continue(())
 ///         },
 ///         impl_node
 ///     );
@@ -89,14 +101,14 @@ pub fn find_matches<'hir>(
 ///     methods
 /// }
 /// ```
-pub fn find_matches_in<'hir>(
+pub fn find_matches_in<'hir, R>(
     hir: &'hir Map,
     matcher: &dyn Predicate<Subject = Node>,
-    callback: &mut dyn FnMut(&Results<'hir>) -> ControlFlow<()>,
+    callback: &mut dyn FnMut(&Results<'hir>) -> ControlFlow<R>,
     entrypoint: &Node,
-) {
+) -> Option<R> {
     let mut visitor = PredicateVisitor { hir, matcher, callback };
-    let _ = traverse_node(hir, &mut visitor, entrypoint);
+    traverse_node(hir, &mut visitor, entrypoint).break_value()
 }
 
 /// Performs a global match against all nodes in the given HIR map.
@@ -108,19 +120,81 @@ pub fn find_matches_in<'hir>(
 /// This is equivalent to:
 /// ```ignore
 /// find_matches(hir, matcher, &mut |result| {
+///     let result = (callback)(result);
+///     ControlFlow::Break(result)
+/// })
+/// ```
+pub fn find_first_match<'hir, R>(
+    hir: &'hir Map,
+    matcher: &dyn Predicate<Subject = Node>,
+    callback: &mut dyn FnMut(&Results<'hir>) -> R,
+) -> Option<R> {
+    find_matches(hir, matcher, &mut |result| {
+        let result = (callback)(result);
+        ControlFlow::Break(result)
+    })
+}
+
+/// Performs a global match against all nodes in the given HIR map.
+///
+/// Searches the HIR map for nodes which satisfy `matcher` and calls `callback`
+/// whenever a match is found. The matcher will continue searching until all
+/// nodes have been checked.
+///
+/// This is equivalent to:
+/// ```ignore
+/// find_matches(hir, matcher, &mut |result| {
 ///     (callback)(result);
-///     ControlFlow::Break(())
+///     ControlFlow::Continue(())
 /// });
 /// ```
-pub fn find_first_match<'hir>(
+pub fn find_all_matches<'hir>(
     hir: &'hir Map,
     matcher: &dyn Predicate<Subject = Node>,
     callback: &mut dyn FnMut(&Results<'hir>),
 ) {
     find_matches(hir, matcher, &mut |result| {
         (callback)(result);
-        ControlFlow::Break(())
+
+        ControlFlow::<()>::Continue(())
     });
+}
+
+/// Performs a global match against all nodes in the given HIR map, which are
+/// descendants of the given entrypoint node.
+///
+/// Searches the HIR map for nodes which satisfy `matcher` and calls `callback`
+/// whenever a match is found. The matcher will continue searching until all
+/// nodes have been checked.
+///
+/// This is equivalent to:
+/// ```ignore
+/// find_matches_in(
+///     hir,
+///     matcher,
+///     &mut |result| {
+///         (callback)(result);
+///         ControlFlow::Continue(())
+///     },
+///     entrypoint
+/// );
+/// ```
+pub fn find_all_matches_in<'hir>(
+    hir: &'hir Map,
+    matcher: &dyn Predicate<Subject = Node>,
+    callback: &mut dyn FnMut(&Results<'hir>),
+    entrypoint: &Node,
+) {
+    find_matches_in(
+        hir,
+        matcher,
+        &mut |result| {
+            (callback)(result);
+
+            ControlFlow::<()>::Continue(())
+        },
+        entrypoint,
+    );
 }
 
 /// Holds the bindings for a given match operation.
@@ -162,14 +236,28 @@ impl Results<'_> {
     /// Gets the node associated with the given binding, if any. Otherwise, if
     /// no binding was found for the current match, returns [`None`].
     #[inline]
-    pub fn bound_node(&self, key: &'static str) -> Option<&'_ Node> {
+    pub fn bound_node(&self, key: &'static str) -> Option<&Node> {
         self.bindings.nodes.get(&key).map(|id| self.hir.node(*id).unwrap())
+    }
+
+    /// Gets the node associated with the given binding and attempts to cast it
+    /// to the type `T`.
+    ///
+    /// If no binding was found, returns [`None`]. Similarly, if the binding
+    /// does not support casting into `T`, returns [`None`].
+    #[inline]
+    pub fn cast_node_as<T>(&self, key: &'static str) -> Option<&T>
+    where
+        Node: cast::Cast<T>,
+    {
+        self.bound_node(key)
+            .and_then(|node| <Node as cast::Cast<T>>::cast(node))
     }
 
     /// Gets the type associated with the given type binding, if any. Otherwise,
     /// if no binding was found for the current match, returns [`None`].
     #[inline]
-    pub fn bound_type(&self, key: &'static str) -> Option<&'_ Type> {
+    pub fn bound_type(&self, key: &'static str) -> Option<&Type> {
         self.bindings.types.get(&key).map(|id| self.hir.type_(*id).unwrap())
     }
 }
@@ -303,14 +391,14 @@ impl PredicateBindTypeExt<Type> for PredicateBox<Type> {
     }
 }
 
-struct PredicateVisitor<'a, 'hir> {
+struct PredicateVisitor<'a, 'hir, R> {
     hir: &'hir Map,
     matcher: &'a dyn Predicate<Subject = Node>,
-    callback: &'a mut dyn FnMut(&Results<'hir>) -> ControlFlow<()>,
+    callback: &'a mut dyn FnMut(&Results<'hir>) -> ControlFlow<R>,
 }
 
-impl Visitor for PredicateVisitor<'_, '_> {
-    type Break = ();
+impl<R> Visitor for PredicateVisitor<'_, '_, R> {
+    type Break = R;
 
     fn visit_node(&mut self, node: &Node) -> std::ops::ControlFlow<Self::Break> {
         let mut bindings = Bindings::default();
