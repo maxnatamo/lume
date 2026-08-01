@@ -2,8 +2,6 @@ pub mod fixtures {
     pub mod matcher;
 }
 
-use std::ops::ControlFlow;
-
 use fixtures::matcher::fixture_as_hir;
 use lume_hir::matcher::*;
 
@@ -34,12 +32,10 @@ fn match_patterns_in_switch() {
         ])
     ]);
 
-    find_matches(&hir, &p, &mut |result| {
+    find_all_matches(&hir, &p, &mut |result| {
         assert!(result.bound_node("ident_block").is_some());
         assert!(result.bound_node("literal_block").is_some());
         assert!(result.bound_node("variant_block").is_some());
         assert!(result.bound_node("wildcard_block").is_some());
-
-        ControlFlow::Continue(())
     });
 }
