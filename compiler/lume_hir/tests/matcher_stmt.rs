@@ -9,7 +9,7 @@ use lume_hir::matcher::*;
 fn match_no_statements() {
     let hir = fixture_as_hir("fn foo() {}");
 
-    find_matches(&hir, &statement([]), &mut |_result| {
+    find_matches::<()>(&hir, &statement([]), &mut |_result| {
         panic!("this should not be called!")
     });
 }

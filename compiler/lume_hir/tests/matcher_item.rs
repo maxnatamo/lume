@@ -22,13 +22,11 @@ fn match_all_items_in_root() {
     let mut called_with = Cell::new(Vec::with_capacity(3));
 
     find_matches(&hir, &function([]).bind("func"), &mut |result| {
-        let lume_hir::Node::Function(func) = result.bound_node("func").unwrap() else {
-            unreachable!();
-        };
+        let func = result.cast_node_as::<lume_hir::FunctionDefinition>("func").unwrap();
 
         called_with.get_mut().push(func.path().to_string());
 
-        ControlFlow::Continue(())
+        ControlFlow::<()>::Continue(())
     });
 
     assert_eq!(called_with.into_inner(), vec!["foo", "bar", "baz"]);
@@ -69,14 +67,10 @@ fn match_with_outside_state() {
 
     let mut matches = Vec::new();
 
-    find_matches(&hir, &function([]).bind("func"), &mut |result| {
-        let lume_hir::Node::Function(func) = result.bound_node("func").unwrap() else {
-            unreachable!();
-        };
+    find_all_matches(&hir, &function([]).bind("func"), &mut |result| {
+        let func = result.cast_node_as::<lume_hir::FunctionDefinition>("func").unwrap();
 
         matches.push(func.path().to_string());
-
-        ControlFlow::Continue(())
     });
 
     assert_eq!(matches, vec!["foo", "bar"]);
@@ -93,7 +87,7 @@ fn match_filter_node() {
     ",
     );
 
-    find_matches(
+    find_all_matches(
         &hir,
         &statement([var_decl([filter(
             |var_decl: &lume_hir::VariableDeclaration| var_decl.name.as_str() == "b",
@@ -101,17 +95,9 @@ fn match_filter_node() {
         )])])
         .bind("decl"),
         &mut |result| {
-            let lume_hir::Node::Statement(stmt) = result.bound_node("decl").unwrap() else {
-                unreachable!();
-            };
-
-            let lume_hir::StatementKind::Variable(var_decl) = &stmt.kind else {
-                unreachable!();
-            };
+            let var_decl = result.cast_node_as::<lume_hir::VariableDeclaration>("decl").unwrap();
 
             assert_eq!(var_decl.name.as_str(), "b");
-
-            ControlFlow::Continue(())
         },
     );
 }
@@ -134,22 +120,16 @@ fn match_optional_bindings() {
         ]).bind("var_decl")
     ]);
 
-    find_matches(&hir, &p, &mut |result| {
-        let lume_hir::Node::Statement(stmt) = result.bound_node("var_decl").unwrap() else {
-            unreachable!();
-        };
-
-        let lume_hir::StatementKind::Variable(var_decl) = &stmt.kind else {
-            unreachable!();
-        };
+    find_all_matches(&hir, &p, &mut |result| {
+        let var_decl = result
+            .cast_node_as::<lume_hir::VariableDeclaration>("var_decl")
+            .unwrap();
 
         match var_decl.name.as_str() {
             "a" => assert!(result.bound_type("var_type").is_none()),
             "b" => assert!(result.bound_type("var_type").is_some()),
             _ => unreachable!(),
         }
-
-        ControlFlow::Continue(())
     });
 }
 
@@ -177,21 +157,13 @@ fn match_inside_node() {
         })
         .unwrap();
 
-    find_matches_in(
+    find_all_matches_in(
         &hir,
         &statement([var_decl([])]).bind("decl"),
         &mut |result| {
-            let lume_hir::Node::Statement(stmt) = result.bound_node("decl").unwrap() else {
-                unreachable!();
-            };
-
-            let lume_hir::StatementKind::Variable(var_decl) = &stmt.kind else {
-                unreachable!();
-            };
+            let var_decl = result.cast_node_as::<lume_hir::VariableDeclaration>("decl").unwrap();
 
             assert_eq!(var_decl.name.as_str(), "a");
-
-            ControlFlow::Continue(())
         },
         foo_node,
     );
@@ -209,17 +181,13 @@ fn match_fn_definitions() {
     );
 
     find_first_match(&hir, &function([]).bind("func"), &mut |result| {
-        let lume_hir::Node::Function(func) = result.bound_node("func").unwrap() else {
-            unreachable!();
-        };
+        let func = result.cast_node_as::<lume_hir::FunctionDefinition>("func").unwrap();
 
         assert_eq!(func.signature.name.to_string(), "foo");
     });
 
     find_first_match(&hir, &function([has_documentation([])]).bind("func"), &mut |result| {
-        let lume_hir::Node::Function(func) = result.bound_node("func").unwrap() else {
-            unreachable!();
-        };
+        let func = result.cast_node_as::<lume_hir::FunctionDefinition>("func").unwrap();
 
         assert_eq!(func.signature.name.to_string(), "bar");
     });
@@ -241,17 +209,13 @@ fn match_method_definitions() {
     );
 
     find_first_match(&hir, &method([]).bind("func"), &mut |result| {
-        let lume_hir::Node::Method(func) = result.bound_node("func").unwrap() else {
-            unreachable!();
-        };
+        let func = result.cast_node_as::<lume_hir::MethodDefinition>("func").unwrap();
 
         assert_eq!(func.signature.name.to_string(), "foo");
     });
 
     find_first_match(&hir, &method([has_documentation([])]).bind("func"), &mut |result| {
-        let lume_hir::Node::Method(func) = result.bound_node("func").unwrap() else {
-            unreachable!();
-        };
+        let func = result.cast_node_as::<lume_hir::MethodDefinition>("func").unwrap();
 
         assert_eq!(func.signature.name.to_string(), "bar");
     });
